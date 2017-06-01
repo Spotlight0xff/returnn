@@ -2552,6 +2552,26 @@ class CrossEntropyLoss(Loss):
           return -self.reduce_func(out)
 
 
+class L1Loss(Loss):
+  """
+  L1-distance loss. sum(target - output).
+  """
+  class_name = "l1"
+
+  def get_value(self):
+    assert not self.target.sparse
+    with tf.name_scope("loss_l1"):
+      assert self.target.ndim_dense == self.output.ndim_dense
+      assert self.output_before_softmax_flat is None
+      # TODO: need to figure out if I need this
+      #if self.output_before_softmax_flat is not None:
+      #  out = self.output_before_softmax_flat - self.target_flat
+      #  return self.reduce_func(out)
+      #else:
+      out = self.target_flat - self.output_flat
+      return -self.reduce_func(out)
+
+
 class GenericCELoss(Loss):
   class_name = "generic_ce"
 
