@@ -2568,7 +2568,7 @@ class L1Loss(Loss):
       #  out = self.output_before_softmax_flat - self.target_flat
       #  return self.reduce_func(out)
       #else:
-      out = self.target_flat - self.output_flat
+      out = tf.abs(self.target_flat - self.output_flat)
       return -self.reduce_func(out)
 
 
