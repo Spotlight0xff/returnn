@@ -2559,17 +2559,10 @@ class L1Loss(Loss):
   class_name = "l1"
 
   def get_value(self):
-    assert not self.target.sparse
+    assert not self.target.sparse, "sparse target values are not yet supported"
     with tf.name_scope("loss_l1"):
       assert self.target.ndim_dense == self.output.ndim_dense
-      assert self.output_before_softmax_flat is None
-      # TODO: need to figure out if I need this
-      #if self.output_before_softmax_flat is not None:
-      #  out = self.output_before_softmax_flat - self.target_flat
-      #  return self.reduce_func(out)
-      #else:
-      out = tf.abs(self.target_flat - self.output_flat)
-      return -self.reduce_func(out)
+      return self.reduce_func(tf.abs(self.target_flat - self.output_flat))
 
 
 class GenericCELoss(Loss):
