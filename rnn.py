@@ -381,6 +381,8 @@ def executeMainTask():
     assert train_data.have_seqs(), "no train files specified, check train option: %s" % config.value('train', None)
     engine.init_train_from_config(config, train_data, dev_data, eval_data)
     engine.train()
+  elif task == "test":
+    engine.init_train_from_config(config, train_data, dev_data, eval_data)
   elif task == "eval":
     engine.init_train_from_config(config, train_data, dev_data, eval_data)
     engine.epoch = config.int("epoch", None)
