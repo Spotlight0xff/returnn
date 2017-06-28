@@ -2128,6 +2128,39 @@ class CombineLayer(LayerBase):
     return x
 
   # Requires the same input shape and yield the same output shape.
+  def _op_kind_sub(self, sources):
+    """
+    :param list[LayerBase] sources:
+    :rtype: tf.Tensor
+    """
+    self._check_same_dense_dim(sources)
+    from TFUtil import swapaxes
+    x = sources[0].output.placeholder
+    batch_axis = sources[0].output.batch_dim_axis
+    for source in sources[1:]:
+      x2 = source.output.placeholder
+      if source.output.batch_dim_axis != batch_axis:
+        x2 = swapaxes(x2, batch_axis, source.output.batch_dim_axis)
+      x -= x2
+    return x
+
+  def _op_kind_mul(self, sources):
+    """
+    :param list[LayerBase] sources:
+    :rtype: tf.Tensor
+    """
+    self._check_same_dense_dim(sources)
+    from TFUtil import swapaxes
+    x = sources[0].output.placeholder
+    batch_axis = sources[0].output.batch_dim_axis
+    for source in sources[1:]:
+      x2 = source.output.placeholder
+      if source.output.batch_dim_axis != batch_axis:
+        x2 = swapaxes(x2, batch_axis, source.output.batch_dim_axis)
+      x *= x2
+    return x
+
+
   def _op_kind_average(self, sources):
     """
     :param list[LayerBase] sources:
