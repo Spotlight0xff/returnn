@@ -973,16 +973,16 @@ class ConstantLayer(LayerBase):
   """
   layer_class = "constant"
 
-  def __init__(self, sources, value=0, dtype=None, **kwargs):
+  def __init__(self, sources, value=0, shape=None, dtype=None, **kwargs):
     assert not sources, "constant layer cannot have sources"
     super(ConstantLayer, self).__init__(**kwargs)
     # Add batch-dim to the constant.
-    self.output.placeholder = tf.expand_dims(tf.constant(value, dtype=dtype), axis=0)
+    self.output.placeholder = tf.expand_dims(tf.constant(value, dtype=dtype, shape=shape), axis=0)
 
   @classmethod
-  def get_out_data_from_opts(cls, name, dtype="float32", **kwargs):
+  def get_out_data_from_opts(cls, name, dtype="float32", shape=(), **kwargs):
     return Data(
-      name="%s_const" % name, shape=(), batch_dim_axis=0, time_dim_axis=None, dtype=dtype)
+      name="%s_const" % name, shape=shape, batch_dim_axis=0, time_dim_axis=None, dtype=dtype)
 
 
 class GatingLayer(_ConcatInputLayer):
