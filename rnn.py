@@ -392,8 +392,11 @@ def executeMainTask():
   elif task == 'forward':
     assert eval_data is not None, 'no eval data provided'
     assert config.has('output_file'), 'no output file provided'
+    assert config.has('start_epoch'), 'no start epoch provided'
     combine_labels = config.value('combine_labels', '')
     output_file = config.value('output_file', '')
+    engine.start_epoch = config.int('start_epoch', 1)
+    engine.use_search_flag = True
     engine.init_network_from_config(config)
     engine.forward_to_hdf(
       data=eval_data, output_file=output_file, combine_labels=combine_labels,
