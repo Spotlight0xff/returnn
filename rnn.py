@@ -414,6 +414,14 @@ def executeMainTask():
     assert train_data is not None, 'train data for priors should be provided'
     engine.init_network_from_config(config)
     engine.compute_priors(dataset=train_data, config=config)
+  elif task == 'tf_graph':
+    import tensorflow as tf
+    import tfgraphviz as tfg
+    engine.init_train_from_config(config, train_data, dev_data, eval_data)
+    # engine.init_network_from_config(config)
+    g = tfg.board(engine.tf_session.graph)
+    g.format = 'png'
+    g.render('tf_graph.png')
   elif task == 'theano_graph':
     import theano.printing
     import theano.compile.io
