@@ -487,8 +487,9 @@ class LayerBase(object):
       output_with_activation=self.output_before_activation,
       target=self._get_target_value())
 
-  def get_loss_value(self):
+  def get_loss_value(self, **kwargs):
     """
+    :param dict kwargs: optional keyword arguments
     :return: the loss, a scalar value, or None if not set. not multiplied by loss_scale
     :rtype: tf.Tensor | None
     """
@@ -496,10 +497,11 @@ class LayerBase(object):
       return None
     self._init_loss()
     with tf.name_scope("loss"):
-      return self.loss.get_value()
+      return self.loss.get_value(**kwargs)
 
-  def get_error_value(self):
+  def get_error_value(self, **kwargs):
     """
+    :param dict kwargs: optional keyword arguments
     :return: usually the frame error rate, or None if not defined
     :rtype: tf.Tensor | None
     """
@@ -507,7 +509,7 @@ class LayerBase(object):
       return None
     self._init_loss()
     with tf.name_scope("error"):
-      return self.loss.get_error()
+      return self.loss.get_error(**kwargs)
 
   def get_loss_normalization_factor(self):
     if not self.loss:
@@ -2961,8 +2963,9 @@ class Loss(object):
       "Expected output dim is %i but the output has dim %i. " % (expected_output_dim, self.output.dim) +
       "Target: %s, output: %s" % (self.target, self.output))
 
-  def get_error(self):
+  def get_error(self, **kwargs):
     """
+    :param dict kwargs: optional keyword arguments
     :return: frame error rate as a scalar value
     :rtype: tf.Tensor
     """
@@ -2981,10 +2984,11 @@ class Loss(object):
         target_label = tf.cast(tf.argmax(target_flat, axis=last_dim), tf.int32)
       output_label = tf.cast(tf.argmax(output_flat, axis=last_dim), target_label.dtype)
       not_equal = tf.not_equal(output_label, target_label)
-      return self.reduce_func(tf.cast(not_equal, tf.float32))
+      return self.reduce_func(tf.cast(not_equal, tf.float32), **kwargs)
 
-  def get_value(self):
+  def get_value(self, **kwargs):
     """
+    :param dict kwargs: optional keyword arguments
     :return: loss as a scalar value
     :rtype: tf.Tensor|None
     """
@@ -3312,10 +3316,10 @@ class L1Loss(Loss):
   """
   class_name = "l1"
 
-  def get_value(self):
+  def get_value(self, **kwargs):
     assert not self.target.sparse, "sparse target values are not yet supported"
     with tf.name_scope("loss_l1"):
-      return self.reduce_func(tf.abs(self.target_flat - self.output_flat))
+      return self.reduce_func(tf.abs(self.target_flat - self.output_flat), **kwargs)
 
 
 class MeanSquaredError(Loss):

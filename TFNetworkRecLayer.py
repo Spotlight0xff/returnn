@@ -940,15 +940,22 @@ class _SubnetworkRecCell(object):
             # in the loop but get it as shape (batch,).
             # This should work with all current implementations
             # but might need some redesign later.
-            layer.loss.reduce_func = lambda x: x
+            # layer.loss.reduce_func = lambda x: x
             if return_loss:
-              value = layer.get_loss_value()
-            elif return_error:
-              value = layer.get_error_value()
+              # print("output shape: ", tf.shape(layer.loss.output))
+              # print("output_flat shape: ", tf.shape(layer.loss.output_flat))
+              # print("batch dim axis: ", layer.loss.output.batch_dim_axis)
+              value = layer.get_loss_value(axis=1, keep_dims=False) # (batch,)
+              print("loss value: ", tf.shape(value))
+              print("loss value get_shape: ", value.get_shape())
+            # elif return_error:
+              # value = tf.placeholder(tf.float32, shape=(None,)) # debug
+              # value = layer.get_error_value(axis=0, keep_dims=False)
             else:
               assert False, "return_error or return_loss"
             assert isinstance(value, tf.Tensor)
-            value.set_shape(tf.TensorShape((None,)))  # (batch,)
+            # value = tf.Print(value, [value, tf.shape(value)], summarize=10, message="loss value:")
+            # value.set_shape(tf.TensorShape((None,)))  # (batch,)
             return value
 
           return get_loss
@@ -959,11 +966,11 @@ class _SubnetworkRecCell(object):
             dtype=tf.float32,
             element_shape=(None,),  # (batch,)
             get=make_get_loss(layer_name, return_loss=True)))
-          outputs_to_accumulate.append(OutputToAccumulate(
-            name="error_%s" % layer_name,
-            dtype=tf.float32,
-            element_shape=(None,),  # (batch,)
-            get=make_get_loss(layer_name, return_error=True)))
+          # outputs_to_accumulate.append(OutputToAccumulate(
+            # name="error_%s" % layer_name,
+            # dtype=tf.float32,
+            # element_shape=(None,),  # (batch,)
+            # get=make_get_loss(layer_name, return_error=True)))
 
       output_beam_size = None
       collected_choices = []  # type: list[str]  # layer names
@@ -1111,21 +1118,21 @@ class _SubnetworkRecCell(object):
         for layer_name in sorted(layer_names_with_losses):
           layer_with_loss_inst = self.net.layers[layer_name]
           loss_value = final_acc_tas_dict["loss_%s" % layer_name].stack(name="loss_%s_stack" % layer_name)
-          error_value = final_acc_tas_dict["error_%s" % layer_name].stack(name="error_%s_stack" % layer_name)
+          # error_value = final_acc_tas_dict["error_%s" % layer_name].stack(name="error_%s_stack" % layer_name)
           loss_value.set_shape(tf.TensorShape((None, None)))  # (time, batch)
-          error_value.set_shape(tf.TensorShape((None, None)))  # (time, batch)
+          # error_value.set_shape(tf.TensorShape((None, None)))  # (time, batch)
           loss_norm_factor = 1.0 / tf.cast(tf.reduce_sum(seq_len), tf.float32)
 
           from TFUtil import sequence_mask_time_major
           mask = sequence_mask_time_major(seq_len)
           loss_value = tf.where(mask, loss_value, tf.zeros_like(loss_value))
-          error_value = tf.where(mask, error_value, tf.zeros_like(error_value))
+          # error_value = tf.where(mask, error_value, tf.zeros_like(error_value))
           loss_value = tf.reduce_sum(loss_value)
-          error_value = tf.reduce_sum(error_value)
+          # error_value = tf.reduce_sum(error_value)
 
           sub_loss += loss_value * layer_with_loss_inst.loss_scale
           # Only one error, not summed up. Determined by sorted layers.
-          sub_error = error_value
+          sub_error = 0 # error_value
           sub_loss_normalization_factor = loss_norm_factor
 
     # Check if collected_choices has all the right layers.
