@@ -1065,9 +1065,9 @@ class _SubnetworkRecCell(object):
               assert end_flag is not None
               seq_filter_cond = tf.logical_not(end_flag)
             seq_filter_cond = tf.reshape(seq_filter_cond, [batch_dim, output_beam_size])  # (batch, beam)
-          for name in collected_choices:
-            with reuse_name_scope(name):
-              self.net.layers[name].search_choices.filter_seqs(seq_filter_cond)
+          # for name in collected_choices:
+            # with reuse_name_scope(name):
+              # self.net.layers[name].search_choices.filter_seqs(seq_filter_cond)
         assert len(acc_tas) == len(outputs_to_accumulate)
         acc_tas = [
           acc_ta.write(i, out.get(), name="%s_acc_ta_write" % out.name)
@@ -1745,6 +1745,8 @@ class ChoiceLayer(LayerBase):
         # It's not a probability distribution, so there is no search here.
         assert self.search_choices.beam_size == 1
         self.output = self.sources[0].output.copy_compatible_to(self.output)
+        net_batch_dim = self.network.get_batch_dim()
+        self.search_choices.src_beams = tf.zeros(shape=(net_batch_dim, 1))
       else:
         net_batch_dim = self.network.get_batch_dim()
         assert self.search_choices.src_layer, (

@@ -384,6 +384,7 @@ def executeMainTask():
     assert config.has('output_file'), 'no output file provided'
     combine_labels = config.value('combine_labels', '')
     output_file = config.value('output_file', '')
+    engine.use_search_flag = True
     engine.init_network_from_config(config)
     engine.forward_to_hdf(
       data=eval_data, output_file=output_file, combine_labels=combine_labels,
