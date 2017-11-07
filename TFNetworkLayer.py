@@ -3700,6 +3700,112 @@ class DeepClusteringLoss(Loss):
       return self.reduce_func(r[-1])
 
 
+class MixtureDensityLoss(Loss):
+  """
+  [Bishop, 1992]: "Mixture Density Networks"
+  """
+  class_name = "mixture_density"
+
+  def __init__(self, n_mixtures, **kwargs):
+    """
+    :param int n_mixtures: number of mixture components
+    """
+    super(MixtureDensityLoss, self).__init__(**kwargs)
+    self._n_mixtures = n_mixtures
+
+  def _check_init(self):
+    """
+    Does some checks on self.target and self.output, e.g. if the dense shapes matches.
+    You can overwrite this if those checks don't make sense for your derived loss class.
+    """
+    assert self.target.ndim_dense == self.output.ndim_dense, (
+      "Number of dimensions mismatch. Target: %s, output: %s" % (self.target, self.output))
+    # expected_output_dim = self._n_mixtures * self.target.shape[-1] * 2  #  TODO
+    # assert expected_output_dim == self.output.dim, (
+      # "Expected output dim is %i but the output has dim %i. " % (expected_output_dim, self.output.dim) +
+      # "Target: %s, output: %s" % (self.target, self.output))
+
+  def get_error(self):
+    """
+    :return: frame error rate as a scalar value
+    :rtype: tf.Tensor | None
+    """
+    return None
+
+
+
+  def tf_normal(self, targets, means, variances):
+    """Gaussian PDF"""
+    import numpy as np
+    oneDivSqrtTwoPI = 1 / np.sqrt(2*np.pi)
+    result = (targets - means) * tf.reciprocal(variances)
+    result = -tf.square(result)/2
+    return (tf.exp(result) * tf.reciprocal(variances)) * oneDivSqrtTwoPI
+
+  def get_loss(self, pdf, weights, targets):
+    out = weights * pdf #  weighted
+    # out = tf.Print(out, [tf.shape(out), out], "out")
+    # out = tf.reduce_sum(out, -1, keep_dims=True)
+    # out = tf.Print(out, [tf.shape(out), out], "out sum")
+    # out = -tf.log(out) # negative log likelihood
+    # out = -tf.reduce_sum(tf.log(out), axis=-1)
+    # out = tf.Print(out, [out], "out log", summarize=200)
+    import numpy
+    scale = 1.0 / ((numpy.pi * 2) ** (1 / 2.))
+    loss = tf.reduce_logsumexp(out, axis=2)
+    # loss = tf.Print(loss, [tf.shape(loss)], "loss shape", summarize=200)
+    loss = -loss - numpy.log(scale)
+    print(scale)
+    return self.reduce_func(loss)
+
+    # return self.reduce_func(tf.reduce_logsumexp(out, axis=0))
+    # return self.reduce_func(out)
+
+  def get_mixture_params(self, outputs):
+    means, variances, weights = tf.split(outputs, 3, axis=-1) # split in feature dim
+    # max_weights = tf.reduce_max(weights, axis=-1, keep_dims=True)
+
+    # we calc in log space
+    weights = tf.nn.log_softmax(weights)
+    # weights = tf.subtract(weights, max_weights)
+    # weights = tf.exp(weights)
+
+    # normalize_weights = tf.reciprocal(tf.reduce_sum(weights, -1, keep_dims=True))
+    # weights = tf.multiply(normalize_weights, weights)
+
+    variances = tf.exp(variances)
+
+    # sum_coeff = tf.reduce_sum(weights, axis=-1)
+    #  all mixing coefficients must sum up to 1
+    # assert_sum_to_one = tf.Assert(tf.reduce_all(tf.less(tf.subtract(sum_coeff, tf.constant(0.)), tf.constant(0.))), [sum_coeff])
+    # assert_sum_to_one = tf.Assert(tf.reduce_all((sum_coeff - 1.0) < 0.05), [sum_coeff])
+    # assert_positive = tf.Assert(tf.reduce_all(tf.logical_and(weights <= 1.,weights >= 0)), [weights])
+
+    # with tf.control_dependencies([assert_sum_to_one, assert_positive]):
+      # weights = tf.identity(weights)
+    return means, variances, weights
+
+  def get_value(self):
+    assert not self.target.sparse, "sparse is not supported yet"
+    # assert self.target.dim == self.output.dim
+    with tf.name_scope("loss_mixture_densities"):
+      # split inputs into 3 equally sized tensors
+      # dims_means = self.output
+      # target: (batch, time)
+      # output: (batch, time)
+      means, variances, coeff = self.get_mixture_params(self.output.placeholder)
+      # assert tf.shape(means)[-1] == self._n_mixtures
+
+
+      # means = tf.Print(means, [tf.shape(means), means], "means shape")
+      pdf_output = self.tf_normal(self.target.placeholder, means, variances)
+      # loss = self.get_loss(means, variances, coeff, self.target.placeholder)
+      # pdf_output = tf.Print(pdf_output, [pdf_output, tf.shape(pdf_output)], "pdf_output")
+
+      loss = self.get_loss(pdf_output, coeff, self.target.placeholder)
+      return loss
+
+
 class L1Loss(Loss):
   """
   L1-distance loss. sum(target - output).
