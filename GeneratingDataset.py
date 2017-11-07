@@ -527,6 +527,31 @@ class DummyDataset(GeneratingDataset):
                            for i in range(i1, i2)])
     return DatasetSeq(seq_idx=seq_idx, features=features, targets=targets)
 
+class SinusoidalDataset(GeneratingDataset):
+
+  def __init__(self, input_dim, output_dim, num_seqs, seq_len=1,
+               **kwargs):
+    super(SinusoidalDataset, self).__init__(input_dim=input_dim, output_dim=output_dim, num_seqs=num_seqs, **kwargs)
+    assert seq_len == 1 and input_dim == 1 and output_dim == 1
+    self.seq_len = seq_len
+    self.num_outputs = {"data": (self.num_inputs, 2), "classes": (1, 2)}
+
+
+  def generate_seq(self, seq_idx):
+    def sinus_func(x):
+      eps = self.random.uniform()
+      return numpy.sin(0.75*x)*7.0 + x*0.5 + eps
+    seq_len = self.seq_len
+    i1 = seq_idx
+    i2 = i1 + seq_len
+
+    features = numpy.array([i for i in range(i1, i2)]).reshape((seq_len, self.num_inputs))
+    i1, i2 = i2, i2 + seq_len
+    targets = numpy.array([sinus_func(i)
+                           for i in range(i1, i2)])
+    return DatasetSeq(seq_idx=seq_idx, features=features, targets=targets)
+
+
 
 class StaticDataset(GeneratingDataset):
 
