@@ -545,10 +545,11 @@ class SinusoidalDataset(GeneratingDataset):
     i1 = seq_idx
     i2 = i1 + seq_len
 
-    features = numpy.array([i for i in range(i1, i2)]).reshape((seq_len, self.num_inputs))
+    x = self.random.uniform(-10.5, 10.5)
+
+    features = numpy.array([x]).reshape((seq_len, self.num_inputs))
     i1, i2 = i2, i2 + seq_len
-    targets = numpy.array([sinus_func(i)
-                           for i in range(i1, i2)])
+    targets = numpy.array([sinus_func(x)])
     return DatasetSeq(seq_idx=seq_idx, features=features, targets=targets)
 
 
