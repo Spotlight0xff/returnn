@@ -3735,44 +3735,37 @@ class MixtureDensityLoss(Loss):
 
 
   def tf_normal(self, targets, means, variances):
-    """Gaussian PDF"""
+    """Gaussian PDF, \phi_i in paper"""
     import numpy as np
     oneDivSqrtTwoPI = 1 / np.sqrt(2*np.pi)
-    result = (targets - means) * tf.reciprocal(variances)
-    result = -tf.square(result)/2
-    return (tf.exp(result) * tf.reciprocal(variances)) * oneDivSqrtTwoPI
+    result = - tf.square(targets - means) / (2 * tf.reciprocal(variances))
+    return oneDivSqrtTwoPI * tf.reciprocal(variances) * tf.exp(result) 
 
-  def get_loss(self, pdf, weights, targets):
-    out = weights * pdf #  weighted
-    # out = tf.Print(out, [tf.shape(out), out], "out")
-    # out = tf.reduce_sum(out, -1, keep_dims=True)
-    # out = tf.Print(out, [tf.shape(out), out], "out sum")
-    # out = -tf.log(out) # negative log likelihood
-    # out = -tf.reduce_sum(tf.log(out), axis=-1)
-    # out = tf.Print(out, [out], "out log", summarize=200)
+  def get_loss(self, means, variances, coeff, targets):
     import numpy
-    scale = 1.0 / ((numpy.pi * 2) ** (1 / 2.))
-    loss = tf.reduce_logsumexp(out, axis=2)
-    # loss = tf.Print(loss, [tf.shape(loss)], "loss shape", summarize=200)
-    loss = -loss - numpy.log(scale)
-    print(scale)
-    return self.reduce_func(loss)
+    d = m = self._n_mixtures
 
-    # return self.reduce_func(tf.reduce_logsumexp(out, axis=0))
-    # return self.reduce_func(out)
+    ps = []  # tensors for each density, each shape (batch,time)
+    scale = 1.0 / ((numpy.pi * 2) ** (d / 2.0))
+    # We calculate everything in log-space.
+    for i in range(m):
+        # variances_l: log of inverted stddev, i.e. reciprocal of the variance, sometimes called precision.
+        log_p_scale = 0.5 * tf.reduce_sum(variances, axis=2)
+        log_p = log_p_scale + \
+            -0.5 * tf.reduce_sum(
+                ((targets - means) ** 2) * tf.exp(variances), axis=2)
+        ps += [coeff[:, :, i] + log_p] # \alpha_i * \phi(t|x), but in logspace
+    log_p_total = tf.stack(ps)  # shape (m,batch,time)
+    log_p_total = tf.reduce_logsumexp(log_p_total, axis=0)  # shape (batch,time)
+    loss = -log_p_total - numpy.log(scale)
+
+    return self.reduce_func(loss)
 
   def get_mixture_params(self, outputs):
     means, variances, weights = tf.split(outputs, 3, axis=-1) # split in feature dim
-    # max_weights = tf.reduce_max(weights, axis=-1, keep_dims=True)
 
     # we calc in log space
     weights = tf.nn.log_softmax(weights)
-    # weights = tf.subtract(weights, max_weights)
-    # weights = tf.exp(weights)
-
-    # normalize_weights = tf.reciprocal(tf.reduce_sum(weights, -1, keep_dims=True))
-    # weights = tf.multiply(normalize_weights, weights)
-
     variances = tf.exp(variances)
 
     # sum_coeff = tf.reduce_sum(weights, axis=-1)
@@ -3785,25 +3778,17 @@ class MixtureDensityLoss(Loss):
       # weights = tf.identity(weights)
     return means, variances, weights
 
+
   def get_value(self):
+    def debug_var(var):
+      return tf.Print(var, [tf.shape(var), var], var.name)
     assert not self.target.sparse, "sparse is not supported yet"
     # assert self.target.dim == self.output.dim
     with tf.name_scope("loss_mixture_densities"):
       # split inputs into 3 equally sized tensors
-      # dims_means = self.output
-      # target: (batch, time)
-      # output: (batch, time)
+      # output: (batch, time, 72)
       means, variances, coeff = self.get_mixture_params(self.output.placeholder)
-      # assert tf.shape(means)[-1] == self._n_mixtures
-
-
-      # means = tf.Print(means, [tf.shape(means), means], "means shape")
-      pdf_output = self.tf_normal(self.target.placeholder, means, variances)
-      # loss = self.get_loss(means, variances, coeff, self.target.placeholder)
-      # pdf_output = tf.Print(pdf_output, [pdf_output, tf.shape(pdf_output)], "pdf_output")
-
-      loss = self.get_loss(pdf_output, coeff, self.target.placeholder)
-      return loss
+      return self.get_loss(means, variances, coeff, self.target.placeholder)
 
 
 class L1Loss(Loss):
