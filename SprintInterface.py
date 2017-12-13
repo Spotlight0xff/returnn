@@ -820,8 +820,14 @@ def forward(segmentName, features):
     posteriors = result[0]
 
   elif BackendEngine.is_tensorflow_selected():
-    posteriors = engine.forward_single(dataset=dataset, seq_idx=seq_idx)
-
+    if 'get_recog_scores' in config.typed_dict:
+      if 'classes' in engine.network.used_data_keys:
+        engine.network.used_data_keys.remove('classes')
+      get_recog_scores = config.typed_dict['get_recog_scores']
+      feed_dict = engine.get_specific_feed_dict(dataset, seq_idx)
+      posteriors = get_recog_scores(engine.tf_session, engine.network, feed_dict)
+    else:
+      posteriors = engine.forward_single(dataset=dataset, seq_idx=seq_idx)
   else:
     raise NotImplementedError("unknown backend engine")
 
