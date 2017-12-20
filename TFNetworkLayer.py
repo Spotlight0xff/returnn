@@ -4421,12 +4421,16 @@ class MixtureDensityLoss(Loss):
   """
   class_name = "mixture_density"
 
-  def __init__(self, n_mixtures, **kwargs):
+  def __init__(self, n_components, n_outputs, pooled_variance = True, **kwargs):
     """
-    :param int n_mixtures: number of mixture components
+    :param int n_components: number of density mixture components
+    :param int n_outputs: number of outputs
+    :param bool pooled_variance: Whether to use a single variance param for all densities
     """
     super(MixtureDensityLoss, self).__init__(**kwargs)
-    self._n_mixtures = n_mixtures
+    self._n_components = n_components
+    self._n_outputs = n_outputs
+    self._pooled_variance = pooled_variance
 
   def _check_init(self):
     """
@@ -4435,10 +4439,14 @@ class MixtureDensityLoss(Loss):
     """
     assert self.target.ndim_dense == self.output.ndim_dense, (
       "Number of dimensions mismatch. Target: %s, output: %s" % (self.target, self.output))
-    # expected_output_dim = self._n_mixtures * self.target.shape[-1] * 2  #  TODO
-    # assert expected_output_dim == self.output.dim, (
-      # "Expected output dim is %i but the output has dim %i. " % (expected_output_dim, self.output.dim) +
-      # "Target: %s, output: %s" % (self.target, self.output))
+
+    if self._pooled_variance:
+      expected_output_dim = (self._n_outputs + 2) * self._n_components
+    else:
+      expected_output_dim = (2*self._n_outputs + 1) * self._n_components
+    assert expected_output_dim == self.output.dim, (
+      "Expected output dim is %i but the output has dim %i. " % (expected_output_dim, self.output.dim) +
+      "Target: %s, output: %s" % (self.target, self.output))
 
   def get_error(self):
     """
@@ -4449,59 +4457,80 @@ class MixtureDensityLoss(Loss):
 
 
 
-  def tf_normal(self, targets, means, variances):
-    """Gaussian PDF, \phi_i in paper"""
-    import numpy as np
-    oneDivSqrtTwoPI = 1 / np.sqrt(2*np.pi)
-    result = - tf.square(targets - means) / (2 * tf.reciprocal(variances))
-    return oneDivSqrtTwoPI * tf.reciprocal(variances) * tf.exp(result) 
-
-  def get_loss(self, means, variances, coeff, targets):
-    import numpy
-    d = m = self._n_mixtures
-
-    ps = []  # tensors for each density, each shape (batch,time)
-    scale = 1.0 / ((numpy.pi * 2) ** (d / 2.0))
+    #ps = []  # tensors for each density, each shape (batch,time)
+    #scale = 1.0 / ((numpy.pi * 2) ** (self._n_outputs / 2.0))
     # We calculate everything in log-space.
-    for i in range(m):
-        # variances_l: log of inverted stddev, i.e. reciprocal of the variance, sometimes called precision.
-        log_p_scale = 0.5 * tf.reduce_sum(variances, axis=2)
-        log_p = log_p_scale + \
-            -0.5 * tf.reduce_sum(
-                ((targets - means) ** 2) * tf.exp(variances), axis=2)
-        ps += [coeff[:, :, i] + log_p] # \alpha_i * \phi(t|x), but in logspace
-    log_p_total = tf.stack(ps)  # shape (m,batch,time)
-    log_p_total = tf.reduce_logsumexp(log_p_total, axis=0)  # shape (batch,time)
-    loss = -log_p_total - numpy.log(scale)
+    #for i in range(self._n_densities):
+    #    # variances_l: log of inverted stddev, i.e. reciprocal of the variance, sometimes called precision.
+    #    log_p_scale = 0.5 * tf.reduce_sum(variances, axis=2)
+    #    log_p = log_p_scale + \
+    #        -0.5 * tf.reduce_sum(
+    #            ((targets - means) ** 2) * tf.exp(variances), axis=2)
+    #    ps += [coeff[:, :, i] + log_p] # \alpha_i * \phi(t|x), but in logspace
+    #log_p_total = tf.stack(ps)  # shape (m,batch,time)
 
-    return self.reduce_func(loss)
+
+
+  def get_loss(self, means, log_variances, log_weights, targets):
+    """
+    Computes the actual loss for the gaussian mixture model
+    :param means: (n_outputs*n_components,) means of the mixture components
+    :param log_variances: (n_outputs,) log(1/variances) of each output dim if pool_variance,
+                      otherwise (n_outputs, n_components)
+    :param log_weights: (num_densities,) mixture density coefficients (log(\alpha_i))
+    :param targets: target placeholder
+    :return:
+    """
+    import numpy
+
+    c = self._n_components
+    m = self._n_outputs
+#   TODO
+#    if self._pooled_variance:
+#      log_variances = tf.reduce_sum(log_variances, axis=-1, keep_dims=True)  # (1,)
+#    else:
+#      log_variances = tf.reduce_sum(log_variances, axis=-1, keep_dims=False)  # (n_components,)
+
+    mse_target = tf.reduce_sum(tf.squared_difference(targets, means), axis=-1)
+
+    exp = log_weights - 0.5*float(c) * tf.log(2*numpy.pi) \
+                  - float(c)     * log_variances \
+                  - mse_target / (tf.exp(log_variances)**2)
+
+    log_gauss = tf.reduce_logsumexp(exp, axis=1)
+
+    return self.reduce_func(-log_gauss)
 
   def get_mixture_params(self, outputs):
-    means, variances, weights = tf.split(outputs, 3, axis=-1) # split in feature dim
+    """
+    Splits the layer inputs so that it matches the expected format
 
-    # we calc in log space
-    weights = tf.nn.log_softmax(weights)
-    variances = tf.exp(variances)
+    :param outputs: outputs of previous layer
+    :return: means, log(variances), log(weights)
+    """
+    dim_mean = [self._n_components * self._n_outputs]
+    if self._pooled_variance:
+      dim_var = [self._n_components]
+    else:
+      dim_var = [self._n_outputs * self._n_components]
+    dim_coeff = [self._n_components]
+    dims = dim_mean + dim_var + dim_coeff
+    print(dims)
+    means, log_variances, weights = tf.split(outputs, dims, axis=-1, name='mdn_param_split')
+    means = tf.squeeze(means)
+    log_variances = tf.squeeze(log_variances)
+    log_weights = tf.squeeze(tf.nn.log_softmax(weights))  # sum to one, log-space
 
-    # sum_coeff = tf.reduce_sum(weights, axis=-1)
-    #  all mixing coefficients must sum up to 1
-    # assert_sum_to_one = tf.Assert(tf.reduce_all(tf.less(tf.subtract(sum_coeff, tf.constant(0.)), tf.constant(0.))), [sum_coeff])
-    # assert_sum_to_one = tf.Assert(tf.reduce_all((sum_coeff - 1.0) < 0.05), [sum_coeff])
-    # assert_positive = tf.Assert(tf.reduce_all(tf.logical_and(weights <= 1.,weights >= 0)), [weights])
+    if not self._pooled_variance:
+      assert False, "not implemented yet."
+      log_variances = tf.reshape(log_variances, [self._n_outputs, self._n_components])
 
-    # with tf.control_dependencies([assert_sum_to_one, assert_positive]):
-      # weights = tf.identity(weights)
-    return means, variances, weights
+    return means, log_variances, log_weights
 
 
   def get_value(self):
-    def debug_var(var):
-      return tf.Print(var, [tf.shape(var), var], var.name)
     assert not self.target.sparse, "sparse is not supported yet"
-    # assert self.target.dim == self.output.dim
     with tf.name_scope("loss_mixture_densities"):
-      # split inputs into 3 equally sized tensors
-      # output: (batch, time, 72)
       means, variances, coeff = self.get_mixture_params(self.output.placeholder)
       return self.get_loss(means, variances, coeff, self.target.placeholder)
 
