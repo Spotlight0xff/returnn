@@ -4557,7 +4557,9 @@ class MixtureDensityLoss(Loss):
       "Number of dimensions mismatch. Target: %s, output: %s" % (self.target, self.output))
 
     if self._pooled_variance:
-      expected_output_dim = (self._n_outputs + 2) * self._n_components
+      # means + variances + weights
+      expected_output_dim = self._n_outputs * self._n_components + \
+                            self._n_outputs + self._n_components
     else:
       expected_output_dim = (2*self._n_outputs + 1) * self._n_components
     assert expected_output_dim == self.output.dim, (
@@ -4572,50 +4574,27 @@ class MixtureDensityLoss(Loss):
     return None
 
 
-
-    #ps = []  # tensors for each density, each shape (batch,time)
-    #scale = 1.0 / ((numpy.pi * 2) ** (self._n_outputs / 2.0))
-    # We calculate everything in log-space.
-    #for i in range(self._n_densities):
-    #    # variances_l: log of inverted stddev, i.e. reciprocal of the variance, sometimes called precision.
-    #    log_p_scale = 0.5 * tf.reduce_sum(variances, axis=2)
-    #    log_p = log_p_scale + \
-    #        -0.5 * tf.reduce_sum(
-    #            ((targets - means) ** 2) * tf.exp(variances), axis=2)
-    #    ps += [coeff[:, :, i] + log_p] # \alpha_i * \phi(t|x), but in logspace
-    #log_p_total = tf.stack(ps)  # shape (m,batch,time)
-
-
-
-  def get_loss(self, means, log_variances, log_weights, targets):
+  def get_loss(self, means, log_variances, weights, targets):
     """
     Computes the actual loss for the gaussian mixture model
-    :param means: (n_outputs*n_components,) means of the mixture components
-    :param log_variances: (n_outputs,) log(1/variances) of each output dim if pool_variance,
+    :param means: (components, B, T, D) means of the mixture components
+    :param log_variances: (components, B, T, D) log(1/variances) of each output dim if pool_variance,
                       otherwise (n_outputs, n_components)
-    :param log_weights: (num_densities,) mixture density coefficients (log(\alpha_i))
-    :param targets: target placeholder
-    :return:
+    :param weights: (B, T, components) mixture density coefficients (log(\alpha_i))
+    :param targets: target data
+    :return: negative log-likelihood
     """
     import numpy
-
-    c = self._n_components
-    m = self._n_outputs
-#   TODO
-#    if self._pooled_variance:
-#      log_variances = tf.reduce_sum(log_variances, axis=-1, keep_dims=True)  # (1,)
-#    else:
-#      log_variances = tf.reduce_sum(log_variances, axis=-1, keep_dims=False)  # (n_components,)
-
-    mse_target = tf.reduce_sum(tf.squared_difference(targets, means), axis=-1)
-
-    exp = log_weights - 0.5*float(c) * tf.log(2*numpy.pi) \
-                  - float(c)     * log_variances \
-                  - mse_target / (tf.exp(log_variances)**2)
-
-    log_gauss = tf.reduce_logsumexp(exp, axis=1)
-
-    return self.reduce_func(-log_gauss)
+    exps = []
+    for i in range(self._n_components):
+      log_p_scale = 0.5 * tf.reduce_sum(log_variances[i], axis=-1)
+      exp = log_p_scale + \
+              -0.5 * tf.reduce_sum(tf.squared_difference(targets, means[i]) * tf.exp(log_variances[i]), axis=-1)
+      exps += [weights[:, :, i] + exp]
+    scale = 1. / ((numpy.pi * 2) ** (self._n_components / 2.))
+    log_gauss = tf.reduce_logsumexp(tf.stack(exps), axis=0)  # (B, T)
+    loss = -log_gauss - numpy.log(scale)
+    return self.reduce_func(loss)
 
   def get_mixture_params(self, outputs):
     """
