@@ -91,10 +91,12 @@ class Data(object):
     self.sparse = sparse
     if shape is None:
       assert dim, "no shape specified, need dim"
-      if sparse:
-        shape = (None,)  # assume common (time,)
+      if time_dim_axis is not None:
+        shape = (None,)
       else:
-        shape = (None, dim)  # assume common (time,feat)
+        shape = ()
+      if not sparse:
+        shape = shape + (dim,)
     self.shape = tuple(shape)  # type: tuple[int|None]  # excluding batch-dim. see self.batch_shape
     if dtype is None:
       if sparse:
@@ -494,17 +496,21 @@ class Data(object):
         return tf.shape(self.placeholder)[self.time_dim_axis]
 
   def get_placeholder_as_time_major(self):
+    assert self.placeholder is not None
     return self.copy_as_time_major().placeholder
 
   def get_placeholder_as_batch_major(self):
+    assert self.placeholder is not None
     return self.copy_as_batch_major().placeholder
 
   def get_placeholder_with_specific_batch_dim_axis(self, batch_dim_axis):
+    assert self.placeholder is not None
     if self.batch_dim_axis == batch_dim_axis:
       return self.placeholder
     return swapaxes(self.placeholder, batch_dim_axis, self.batch_dim_axis)
 
   def get_placeholder_time_flattened(self):
+    assert self.placeholder is not None
     assert self.have_time_axis()
     # flatten_with_seq_len_mask only works for these two cases at the moment:
     assert (self.time_dim_axis, self.batch_dim_axis) == (0, 1) or (self.time_dim_axis, self.batch_dim_axis) == (1, 0)
@@ -520,6 +526,7 @@ class Data(object):
       or (batch, time, height, dim) will also become (batch'|time', dim).
       with keep_dims, (batch, time, height, dim) will become (batch'|time', 1, 1, dim).
     """
+    assert self.placeholder is not None
     x = self.placeholder
     dyn_axes = self.get_spatial_batch_axes() + [self.batch_dim_axis]
     if dyn_axes == [self.batch_dim_axis]:
@@ -714,6 +721,14 @@ class Data(object):
       seq_mask, [i for i in range(self.batch_ndim) if i not in (self.batch_dim_axis, self.time_dim_axis)])
     assert seq_mask.get_shape().ndims == self.batch_ndim
     return seq_mask
+
+  def get_batch_dim(self):
+    """
+    :rtype: tf.Tensor
+    """
+    assert self.placeholder is not None
+    assert self.batch_dim_axis is not None
+    return tf.shape(self.placeholder)[self.batch_dim_axis]
 
   def get_spatial_batch_axes(self):
     """
@@ -1345,6 +1360,9 @@ def get_tf_list_local_devices():
   This uses tensorflow.device_lib.list_local_devices().
   Note that a call to this will trigger the internal TF thread pool inits,
   so you should call :func:`setup_tf_thread_pools` first.
+  Note that this will list all available devices.
+  Any TF session might only use a subset of these.
+  You can get the list available in a given TF session by :func:`tf.Session.list_devices`.
 
   :rtype: list[tensorflow.core.framework.device_attributes_pb2.DeviceAttributes]
   """
@@ -4192,7 +4210,7 @@ class ExplicitRandomShuffleQueue(object):
 
 def mem_usage_for_dev(dev_name):
   """
-  :param str dev_name: e.g. "/device:GPU:0"
+  :param str dev_name: e.g. "/device:GPU:0" or "/job:localhost/replica:0/task:0/device:GPU:0"
   :return: int scalar, which is the peak memory usage in bytes of the given device
   :rtype: tf.Tensor
 
@@ -4212,7 +4230,7 @@ def mem_usage_for_dev(dev_name):
       return bytes_in_use()
 
   assert dev_name.startswith("/")  # e.g. "/cpu:0" or "/gpu:0"
-  scope_name = dev_name[1:].replace(":", "")  # e.g. "cpu0" or "gpu0"
+  scope_name = dev_name[1:].replace(":", "").replace("/", "_")  # e.g. "cpu0" or "gpu0"
   return global_tensor(get, "mem_usage_%s" % scope_name)
 
 
