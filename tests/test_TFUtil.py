@@ -539,7 +539,7 @@ def test_slice_nd():
   n_dim = 4
   size = 4
   start = numpy.random.randint(low=0, high=12, size=(n_batch,))
-  source = numpy.arange(1, n_batch*n_time*n_dim + 1).reshape(n_batch, n_time, n_dim)
+  source = numpy.arange(1, n_batch*n_time*n_dim + 1, dtype=numpy.float32).reshape(n_batch, n_time, n_dim)
   def naive_slice_nd(x, start, size):
       ys = numpy.zeros(shape=(n_batch, size, n_dim))
       for i in range(len(start)):
@@ -556,7 +556,7 @@ def test_slice_nd():
       return ys
 
   naive = naive_slice_nd(source, start, size)
-  real = slice_nd(source, start=start, size=size)
+  real = slice_nd(source, start=start, size=size).eval()
   print("source:")
   print(source)
   print("naive:")
