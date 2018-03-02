@@ -3134,20 +3134,22 @@ def slice_nd(x, start, size, seq_lens=None):
   with tf.name_scope("slice_nd"):
     shape = tf.shape(x)
     n_batch = shape[0]
-    batch_idxs = tf.cumsum(tf.ones(shape=(n_batch, size)), exclusive=True)
-    batch_idxs = tf.to_int32(tf.reshape(batch_idxs, (-1,)))
 
-    sizes = start[:,None] + tf.range(size)
-    sizes = tf.reshape(sizes, (-1,))
-    indices = tf.stack([batch_idxs, sizes])
-    indices = tf.transpose(indices)
+    batch_idxs = expand_dims_unbroadcast(tf.range(n_batch), 1, size)  # (n_batch, size)
+    batch_idxs = tf.reshape(batch_idxs, (-1,))  # (n_batch*size,)
+
+    sizes = start[:,None] + tf.range(size)  # (n_batch, size)
+    sizes = tf.reshape(sizes, (-1,))  # (n_batch*size,)
 
 
     # check for invalid indices
-    pad_idx = tf.where(indices[:,1] > shape[1]-1)
-    clip_time_idx = tf.clip_by_value(indices[:,1], 0, shape[1]-1)
-    indices = tf.stack([indices[:,0], clip_time_idx])
-    indices = tf.transpose(indices)
+    pad_idx = tf.where(sizes > shape[1] - 1)  # (n_need_pad,)
+    clip_time_idx = tf.clip_by_value(sizes, 0, shape[1] - 1)  # (n_batch*size,)
+
+    indices = tf.stack([batch_idxs, clip_time_idx])  # (n_batch*size, 2)
+    indices = tf.transpose(indices)  # (2, n_batch*size)
+
+
 
     slices = tf.gather_nd(x, indices)
 
@@ -3156,7 +3158,7 @@ def slice_nd(x, start, size, seq_lens=None):
 
 
     # TODO: fix
-    slices = tf.scatter_nd_update(slices, pad_idx[:,0], tf.constant([0], dtype=tf.int64))
+    #slices = tf.scatter_nd_update(slices, pad_idx[:,0], tf.constant([0], dtype=tf.int64))
 
     slices = tf.reshape(slices, new_shape)
     return slices
