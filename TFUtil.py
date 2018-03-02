@@ -3132,7 +3132,34 @@ def slice_nd(x, start, size, seq_lens=None):
   :rtype: tf.Tensor
   """
   with tf.name_scope("slice_nd"):
-    pass  # TODO...
+    shape = tf.shape(x)
+    n_batch = shape[0]
+    batch_idxs = tf.cumsum(tf.ones(shape=(n_batch, size)), exclusive=True)
+    batch_idxs = tf.to_int32(tf.reshape(batch_idxs, (-1,)))
+
+    sizes = start[:,None] + tf.range(size)
+    sizes = tf.reshape(sizes, (-1,))
+    indices = tf.stack([batch_idxs, sizes])
+    indices = tf.transpose(indices)
+
+
+    # check for invalid indices
+    pad_idx = tf.where(indices[:,1] > shape[1]-1)
+    clip_time_idx = tf.clip_by_value(indices[:,1], 0, shape[1]-1)
+    indices = tf.stack([indices[:,0], clip_time_idx])
+    indices = tf.transpose(indices)
+
+    slices = tf.gather_nd(x, indices)
+
+    # we assume time-axis is 1
+    new_shape = tf.concat([[shape[0], size], shape[2:]], axis=0)
+
+
+    # TODO: fix
+    slices = tf.scatter_nd_update(slices, pad_idx[:,0], tf.constant([0], dtype=tf.int64))
+
+    slices = tf.reshape(slices, new_shape)
+    return slices
 
 
 def global_tensor(f, name):
