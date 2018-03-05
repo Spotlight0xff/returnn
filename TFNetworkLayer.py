@@ -1666,6 +1666,7 @@ class SliceNdLayer(_ConcatInputLayer):
     slices = slice_nd(x.placeholder, tf.cast(start, tf.int32), size)  # (B,size, ...)
 
     self.output.size_placeholder = x.size_placeholder.copy()
+    del self.output.size_placeholder[0]
     self.output.placeholder = slices
 
   @classmethod
