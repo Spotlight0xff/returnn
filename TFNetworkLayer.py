@@ -4050,6 +4050,71 @@ class FramewiseStatisticsLayer(LayerBase):
     # n_out=1 is a workaround for now. Our output should not be used. We have none.
     return Data(name="framewise_statistics_dummy_output", shape=(), dtype="int32", batch_dim_axis=None)
 
+class DumpLayer(LayerBase):
+  """Dumps the sources to a file/console"""
+
+  layer_class = "dump"
+
+  def __init__(self, filename=None, **kwargs):
+    super(DumpLayer, self).__init__(**kwargs)
+    with tf.name_scope("dump_attention"):
+      source = self.sources[0]
+      output = tf.Print(source.output.placeholder, [source.output.placeholder], kwargs["name"], summarize=99)
+      img = tf.transpose(output, [1,0,2,3]) # (B, T-dec, T-enc, 1)
+      tf.summary.image("attention_weights", img, max_outputs=3)
+      self.output.placeholder = output # this will probably not be executed.. TODO, but fine for now
+      self.output.size_placeholder = source.output.size_placeholder.copy()
+
+  @classmethod
+  def transform_config_dict(cls, d, network, get_layer):
+    """
+    :param dict[str] d: will modify inplace, the loss_opts
+    :param TFNetwork.TFNetwork network:
+    :param ((str) -> LayerBase) get_layer: function to get or construct another layer
+    """
+    assert "from" in d
+    from TFNetworkRecLayer import RecLayer, _SubnetworkRecCell
+
+    sources = d.pop("from", [])
+    if isinstance(sources, str):
+      sources = [sources]
+    assert len(sources) == 1
+    assert isinstance(sources[0], str)
+
+    if ":" in sources[0]: # subnet output (subnet:layer)
+      parts = sources[0].split(":")
+      assert len(parts) == 2
+      base, layer = parts
+
+      # this can be used to retrieve outputs from a subnet
+
+
+      base = get_layer(base)
+      assert isinstance(base, RecLayer)
+      assert isinstance(base.cell, _SubnetworkRecCell)
+      cell = base.cell
+
+      template = cell.layer_data_templates[layer]  # get layer template
+      # fill in placeholder (TA) in a hacky way
+      template.output.placeholder = cell.final_acc_tas_dict["output_%s" %layer].stack()
+      template.output.size_placeholder = template.output.size_placeholder # TODO, shift
+
+      d["sources"] = [template]
+    else:  # normal layer
+      d["sources"] = get_layer(sources[0])
+
+  @classmethod
+  def get_out_data_from_opts(cls, **kwargs):
+    " This is supposed to return a :class:`Data` instance as a template, given the arguments. "
+    # TODO handle tensorarray dims
+    sources = kwargs["sources"]
+    return Data(
+      name="%s_output" % kwargs["name"],
+      shape=(None,) + sources[0].output.shape,
+      dtype=sources[0].output.dtype,
+      batch_dim_axis=sources[0].output.batch_dim_axis + 1)
+
+
 
 # ------------------------------------------------------------------------------
 
