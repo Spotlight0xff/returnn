@@ -4250,7 +4250,7 @@ class TopKLayer(_ConcatInputLayer):
     return shape, dim
 
   @classmethod
-  def get_sub_layer_out_data_from_opts(cls, layer_name, k, axis, sources, parent_layer_kwargs):
+  def get_sub_layer_out_data_from_opts(cls, layer_name, parent_layer_kwargs):
     """
     Called by _TemplateLayer.get_sub_layer(). Gets a Data template for the sub-layer with name 'layer_name'.
 
@@ -4260,23 +4260,12 @@ class TopKLayer(_ConcatInputLayer):
     :rtype: (Data, TFNetwork, type)|None
     """
     assert layer_name == "indices"
+    k, axis, sources = [parent_layer_kwargs[k] for k in ["k", "axis", "sources"]]
     out = get_concat_sources_data_template(parent_layer_kwargs["sources"], name="%s_output" % layer_name)
     axis = out.get_axis_from_description(axis)
-    #out.dim = k  # may actually be dynamic
-    # if isinstance(k, LayerBase):
-    # assert k.output.shape == (), "you have to provide a scalar top-k parameter"
-    # assert k.output.dtype.startswith("int")
-    # k = k.output.placeholder
-    # out.dim = None
-    #shape = out.shape
-    #del shape[axis - 1]
-    #out.shape = tuple(shape) + (out.dim,)
-    out.shape, out.dim =cls._compute_shape(k, axis, out)
+    out.shape, out.dim = cls._compute_shape(k, axis, out)
     out.sparse = True
     return out
-    # out = self.get_out_data_from_opts(cls, **parent_layer_kwargs)
-    # out.sparse = True
-    # return out
 
 
 class GatherNdLayer(_ConcatInputLayer):
@@ -4290,14 +4279,11 @@ class GatherNdLayer(_ConcatInputLayer):
     :param indices: specifies the layer to index into the source
     """
     super(GatherNdLayer, self).__init__(**kwargs)
-    # TODO: check compatibility for indices and input
-    # TODO: check if we need to build the indices tensor
     base_t = self.input_data.get_placeholder_as_batch_major()
     self.indices = indices
     indices_t = indices.output.get_placeholder_as_batch_major()
     idxs = TFUtil.nd_indices(indices_t)
     result = tf.gather_nd(base_t, idxs)
-
     self.output.placeholder = result
     self.output.size_placeholder = self.input_data.size_placeholder.copy()
     self.output.size_placeholder.pop(len(indices.output.shape), None)
@@ -4330,7 +4316,6 @@ class GatherNdLayer(_ConcatInputLayer):
     """
     assert "n_out" not in kwargs, "Don't set n_out explicity in this layer"
     assert indices.output.sparse, "indices must be sparse"
-    import Util
     source_data = get_concat_sources_data_template(sources, name="%s_output" % name).copy_as_batch_major()
     indices_output = indices.output.copy_as_batch_major()
     indices_shape = indices_output.shape
