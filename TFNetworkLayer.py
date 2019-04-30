@@ -4175,6 +4175,161 @@ class SqueezeLayer(_ConcatInputLayer):
       axis=axis, keep_dims=False, enforce_batch_dim_axis=enforce_batch_dim_axis, sources=sources, **kwargs)
 
 
+class TopKLayer(_ConcatInputLayer):
+  """Performs the Top-K operation for some input on the last axis.
+  You can access the corresponding indices using `layer_name/indices`
+  Note: it will swap the `axis` to the back.
+  """
+  layer_class = "top_k"
+
+  def __init__(self, k, axis, **kwargs):
+    super(TopKLayer, self).__init__(**kwargs)
+    assert isinstance(k, int)
+    axis = self.input_data.get_axis_from_description(axis)
+    # tf.top_k uses only the last dim
+    want_axis = self.input_data.get_axis_from_description(-1)
+    data_t = TFUtil.swapaxes(self.input_data.placeholder, axis1=axis, axis2=want_axis)
+    top_k = tf.nn.top_k(data_t, k=k)
+    self.indices = TFUtil.swapaxes(top_k.indices, axis1=want_axis, axis2=axis)  # for later access
+    self.output.placeholder = TFUtil.swapaxes(top_k.values, axis1=want_axis, axis2=axis)
+    self.output.size_placeholder = self.input_data.size_placeholder.copy()
+    self.output.size_placeholder.pop(axis, None)  # specified axis is now static
+    shape, dim = self._compute_shape(k, axis, self.input_data)
+    indices_out = Data(name="%s_indices_output" % self.name,shape=shape, dim=dim, sparse=True)
+    indices_out.placeholder = self.indices
+    indices_layer = InternalLayer(name="%s_indices" % self.name, network=self.network, output=indices_out)
+    self.indices_layer = indices_layer
+
+  @classmethod
+  def get_out_data_from_opts(cls, name, sources, k, axis, **kwargs):
+    """
+    :param name:
+    :param sources:
+    :param k:
+    :param axis:
+    :param kwargs:
+    :return: Data template (placeholder not set)
+    :rtype: Data
+    """
+    assert "n_out" not in kwargs, "Don't set n_out explicity in this layer"
+    out = get_concat_sources_data_template(sources, name="%s_output" % name)
+    shape, dim = cls._compute_shape(k, axis, out)
+    dtype = sources[0].output.dtype
+    return Data(
+      name="%s_topk_values" % name,
+      shape=shape, dim=dim,
+      batch_dim_axis=out.batch_dim_axis,
+      time_dim_axis=out.time_dim_axis,
+      feature_dim_axis=out.feature_dim_axis,
+      dtype=dtype)
+
+  def get_sub_layer(self, layer_name):
+    """
+    We want to be able to access the top-k indices.
+    Thus we support `layer_name/indices`.
+
+    :param str layer_name: name of the sub_layer (right part of '/' separated path)
+    :return: the sub_layer addressed in layer_name or None if no sub_layer exists
+    :rtype: LayerBase|None
+    """
+    assert layer_name == "indices"
+    return self.indices_layer
+
+  @staticmethod
+  def _compute_shape(k, axis, input_data):
+    axis = input_data.get_axis_from_description(axis)
+    if axis == input_data.batch_ndim - 1:
+      shape = input_data.shape[:-1] + (k,)
+      dim = k
+    else:  # otherwise we moved the axis
+      shape = list(input_data.shape)
+      shape[axis-1] = k  # without batch_dim, assume axis<batch_axis
+      dim = input_data.dim
+      if axis == input_data.feature_dim_axis:
+        dim = k
+    return shape, dim
+
+  @classmethod
+  def get_sub_layer_out_data_from_opts(cls, layer_name, k, axis, sources, parent_layer_kwargs):
+    """
+    Called by _TemplateLayer.get_sub_layer(). Gets a Data template for the sub-layer with name 'layer_name'.
+
+    :param str layer_name: name of the sub_layer (right part of '/' separated path)
+    :param dict[str] parent_layer_kwargs: kwargs for the parent layer (as kwargs in cls.get_out_data_from_opts())
+    :return: Data template, network and the class type of the sub-layer
+    :rtype: (Data, TFNetwork, type)|None
+    """
+    assert layer_name == "indices"
+    out = get_concat_sources_data_template(parent_layer_kwargs["sources"], name="%s_output" % layer_name)
+    axis = out.get_axis_from_description(axis)
+    #out.dim = k  # may actually be dynamic
+    # if isinstance(k, LayerBase):
+    # assert k.output.shape == (), "you have to provide a scalar top-k parameter"
+    # assert k.output.dtype.startswith("int")
+    # k = k.output.placeholder
+    # out.dim = None
+    #shape = out.shape
+    #del shape[axis - 1]
+    #out.shape = tuple(shape) + (out.dim,)
+    out.shape, out.dim =cls._compute_shape(k, axis, out)
+    out.sparse = True
+    return out
+    # out = self.get_out_data_from_opts(cls, **parent_layer_kwargs)
+    # out.sparse = True
+    # return out
+
+
+class GatherNdLayer(_ConcatInputLayer):
+  """Gathers some values from a given input according to the indices.
+  """
+  layer_class = "gather_nd"
+  recurrent = True
+
+  def __init__(self, indices, **kwargs):
+    super(GatherNdLayer, self).__init__(**kwargs)
+    # TODO: check compatibility for indices and input
+    # TODO: check if we need to build the indices tensor
+    base_t = self.input_data.get_placeholder_as_batch_major()
+    self.indices = indices
+    indices_t = indices.output.get_placeholder_as_batch_major()
+    idxs = TFUtil.nd_indices(indices_t)
+    # get encoder values
+    result = tf.gather_nd(base_t, idxs)
+
+    self.output.placeholder = result
+    self.output.size_placeholder = self.input_data.size_placeholder.copy()
+    self.output.size_placeholder.pop(len(indices.output.shape), None)
+
+  def get_dep_layers(self):
+    return super(GatherNdLayer, self).get_dep_layers() + [self.indices]
+
+  @classmethod
+  def transform_config_dict(cls, d, network, get_layer):
+    """
+    :param dict[str] d: will modify inplace, the loss_opts
+    :param TFNetwork.TFNetwork network:
+    :param ((str) -> LayerBase) get_layer: function to get or construct another layer
+    """
+    super(GatherNdLayer, cls).transform_config_dict(d, network=network, get_layer=get_layer)
+    d["indices"] = get_layer(d.pop("indices"))
+
+  @classmethod
+  def get_out_data_from_opts(cls, name, sources, indices, **kwargs):
+    assert "n_out" not in kwargs, "Don't set n_out explicity in this layer"
+    assert indices.output.sparse, "indices must be sparse"
+    import Util
+    out = get_concat_sources_data_template(sources, name="%s_output" % name).copy_as_batch_major()
+    indices_output = indices.output.copy_as_batch_major()
+    out = out.copy_as_batch_major()
+    indices_shape = indices_output.shape
+    out.shape = indices_shape + out.shape[len(indices_shape):]
+    out.feature_dim_axis = Util.NotSpecified
+    out.time_dim_axis = None  # TODO DEBUG
+    out.dim = indices_shape[-1]
+    # out.dim = out.shape[-1]
+    return out
+
+
 class WeightedSumLayer(_ConcatInputLayer):
   """
   Calculates a weighted sum, either over a complete axis of fixed dimension, or over some window.
