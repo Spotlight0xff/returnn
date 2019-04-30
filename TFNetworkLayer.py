@@ -4220,7 +4220,6 @@ class TopKLayer(_ConcatInputLayer):
       shape=shape, dim=dim,
       batch_dim_axis=out.batch_dim_axis,
       time_dim_axis=out.time_dim_axis,
-      feature_dim_axis=out.feature_dim_axis,
       dtype=dtype)
 
   def get_sub_layer(self, layer_name):
