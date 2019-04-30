@@ -4246,7 +4246,7 @@ class TopKLayer(_ConcatInputLayer):
       dim = input_data.dim
       if axis == input_data.feature_dim_axis:
         dim = k
-    return shape, dim
+    return tuple(shape), dim
 
   @classmethod
   def get_sub_layer_out_data_from_opts(cls, layer_name, parent_layer_kwargs):
@@ -4264,7 +4264,10 @@ class TopKLayer(_ConcatInputLayer):
     axis = out.get_axis_from_description(axis)
     out.shape, out.dim = cls._compute_shape(k, axis, out)
     out.sparse = True
-    return out
+    # TODO: if in subnet, return:
+    return out, parent_layer_kwargs["network"], InternalLayer
+    # TODO: else:
+    # return out
 
 
 class GatherNdLayer(_ConcatInputLayer):
