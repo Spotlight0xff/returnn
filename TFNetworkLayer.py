@@ -4195,7 +4195,7 @@ class TopKLayer(_ConcatInputLayer):
     self.output.size_placeholder = self.input_data.size_placeholder.copy()
     self.output.size_placeholder.pop(axis, None)  # specified axis is now static
     shape, dim = self._compute_shape(k, axis, self.input_data)
-    indices_out = Data(name="%s_indices_output" % self.name,shape=shape, dim=dim, sparse=True)
+    indices_out = Data(name="%s_indices_output" % self.name, shape=shape, dim=dim, sparse=True)
     indices_out.placeholder = self.indices
     indices_layer = InternalLayer(name="%s_indices" % self.name, network=self.network, output=indices_out)
     self.indices_layer = indices_layer
@@ -4260,10 +4260,15 @@ class TopKLayer(_ConcatInputLayer):
     """
     assert layer_name == "indices"
     k, axis, sources = [parent_layer_kwargs[k] for k in ["k", "axis", "sources"]]
-    out = get_concat_sources_data_template(parent_layer_kwargs["sources"], name="%s_output" % layer_name)
-    axis = out.get_axis_from_description(axis)
-    out.shape, out.dim = cls._compute_shape(k, axis, out)
-    out.sparse = True
+    source_data = get_concat_sources_data_template(parent_layer_kwargs["sources"], name="%s_output" % layer_name)
+    axis = source_data.get_axis_from_description(axis)
+    shape, dim = cls._compute_shape(k, axis, source_data)
+    out = Data(
+      name="%s_indices" % layer_name,
+      shape=shape, dim=dim,
+      batch_dim_axis=source_data.batch_dim_axis,
+      time_dim_axis=source_data.time_dim_axis,
+      sparse=True)
     # TODO: if in subnet, return:
     return out, parent_layer_kwargs["network"], InternalLayer
     # TODO: else:
