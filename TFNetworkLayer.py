@@ -4340,7 +4340,6 @@ class GatherNdLayer(_ConcatInputLayer):
       shape=shape,
       batch_dim_axis=source_data.batch_dim_axis,
       time_dim_axis=source_data.time_dim_axis,
-      feature_dim_axis=source_data.feature_dim_axis,
       dtype=source_data.dtype)
 
 
