@@ -4286,6 +4286,9 @@ class GatherNdLayer(_ConcatInputLayer):
   recurrent = True
 
   def __init__(self, indices, **kwargs):
+    """
+    :param indices: specifies the layer to index into the source
+    """
     super(GatherNdLayer, self).__init__(**kwargs)
     # TODO: check compatibility for indices and input
     # TODO: check if we need to build the indices tensor
@@ -4293,7 +4296,6 @@ class GatherNdLayer(_ConcatInputLayer):
     self.indices = indices
     indices_t = indices.output.get_placeholder_as_batch_major()
     idxs = TFUtil.nd_indices(indices_t)
-    # get encoder values
     result = tf.gather_nd(base_t, idxs)
 
     self.output.placeholder = result
@@ -4301,6 +4303,10 @@ class GatherNdLayer(_ConcatInputLayer):
     self.output.size_placeholder.pop(len(indices.output.shape), None)
 
   def get_dep_layers(self):
+    """
+    :return: list of layers this layer depends on, includes the index-layer.
+    :rtype: list[LayerBase]
+    """
     return super(GatherNdLayer, self).get_dep_layers() + [self.indices]
 
   @classmethod
@@ -4315,19 +4321,27 @@ class GatherNdLayer(_ConcatInputLayer):
 
   @classmethod
   def get_out_data_from_opts(cls, name, sources, indices, **kwargs):
+    """
+    :param name:
+    :param sources:
+    :param indices:
+    :param kwargs:
+    :rtype: Data
+    """
     assert "n_out" not in kwargs, "Don't set n_out explicity in this layer"
     assert indices.output.sparse, "indices must be sparse"
     import Util
-    out = get_concat_sources_data_template(sources, name="%s_output" % name).copy_as_batch_major()
+    source_data = get_concat_sources_data_template(sources, name="%s_output" % name).copy_as_batch_major()
     indices_output = indices.output.copy_as_batch_major()
-    out = out.copy_as_batch_major()
     indices_shape = indices_output.shape
-    out.shape = indices_shape + out.shape[len(indices_shape):]
-    out.feature_dim_axis = Util.NotSpecified
-    out.time_dim_axis = None  # TODO DEBUG
-    out.dim = indices_shape[-1]
-    # out.dim = out.shape[-1]
-    return out
+    shape = indices_shape + source_data.shape[len(indices_shape):]
+    return Data(
+      name="%s_output" % name,
+      shape=shape,
+      batch_dim_axis=source_data.batch_dim_axis,
+      time_dim_axis=source_data.time_dim_axis,
+      feature_dim_axis=source_data.feature_dim_axis,
+      dtype=source_data.dtype)
 
 
 class WeightedSumLayer(_ConcatInputLayer):

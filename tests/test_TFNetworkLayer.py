@@ -1564,13 +1564,16 @@ def test_TopK_GatherNd():
   with make_scope() as session:
     t_enc = 14
     top_k = 6
+    enc_dim = 20
     config = Config({
       "extern_data": {
-        "weights": {"shape": (None, 1), "dim": 1, "sparse": False}},
+        "weights": {"shape": (None, 1), "dim": 1, "sparse": False},
+        "encoder": {"shape": (None, 20), "sparse": False},
+      },
       "network": {
         "weights_squeezed": {"class": "squeeze", "from": "data:weights", "axis": -1},  # (B, enc-T)
         "top_k": {"class": "top_k", "from": "weights_squeezed", "axis": 1, "k": top_k},  # (B, K)
-        "output": {"class": "gather_nd", "indices": "top_k/indices", "from": "weights_squeezed"}
+        "output": {"class": "gather_nd", "indices": "top_k/indices", "from": "data:encoder"}
       },
     })
     network = TFNetwork(config=config, train_flag=True)
@@ -1582,17 +1585,20 @@ def test_TopK_GatherNd():
     assert len(n_times) == n_batch
     top_k_layer = network.layers["top_k"]
     output_layer = network.layers["output"]
+    assert output_layer.output.batch_shape == (None, top_k, enc_dim)
+    assert output_layer.output.dim == enc_dim
     extern_data = network.extern_data
     feed_dict = {
       extern_data.data["weights"].placeholder: numpy.random.normal(size=(n_batch, t_enc, 1)).astype("float32"),
-      extern_data.data["weights"].size_placeholder[0]: numpy.array(n_times, dtype="int32")
+      extern_data.data["weights"].size_placeholder[0]: numpy.array(n_times, dtype="int32"),
+      extern_data.data["encoder"].placeholder: numpy.random.normal(size=(n_batch, t_enc, enc_dim)).astype("float32"),
+      extern_data.data["encoder"].size_placeholder[0]: numpy.array(n_times, dtype="int32"),
     }
     session.run(tf.global_variables_initializer())
     topk_output, gather_output = session.run(
       [top_k_layer.output.placeholder, output_layer.output.placeholder],
       feed_dict=feed_dict)
-    assert topk_output.shape == gather_output.shape
-    numpy.testing.assert_array_almost_equal(topk_output, gather_output, decimal=5)
+    assert gather_output.shape == (n_batch, top_k, enc_dim)
 
 
 def test_DotLayer():
