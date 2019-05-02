@@ -4183,22 +4183,23 @@ class TopKLayer(_ConcatInputLayer):
   layer_class = "top_k"
 
   def __init__(self, k, axis, **kwargs):
+    """
+    :param k: to specify how many top elements to select
+    :param axis: axis to perform top_k on
+    """
     super(TopKLayer, self).__init__(**kwargs)
     assert isinstance(k, int)
     axis = self.input_data.get_axis_from_description(axis)
+    self.k = k
+    self.axis = axis
     # tf.top_k uses only the last dim
     want_axis = self.input_data.get_axis_from_description(-1)
-    data_t = TFUtil.swapaxes(self.input_data.placeholder, axis1=axis, axis2=want_axis)
-    top_k = tf.nn.top_k(data_t, k=k)
-    self.indices = TFUtil.swapaxes(top_k.indices, axis1=want_axis, axis2=axis)  # for later access
-    self.output.placeholder = TFUtil.swapaxes(top_k.values, axis1=want_axis, axis2=axis)
+    data_t = TFUtil.swapaxes(self.input_data.placeholder, axis1=self.axis, axis2=want_axis)
+    top_k = tf.nn.top_k(data_t, k=self.k)
+    self.indices = TFUtil.swapaxes(top_k.indices, axis1=want_axis, axis2=self.axis)  # for later access
+    self.output.placeholder = TFUtil.swapaxes(top_k.values, axis1=want_axis, axis2=self.axis)
     self.output.size_placeholder = self.input_data.size_placeholder.copy()
-    self.output.size_placeholder.pop(axis, None)  # specified axis is now static
-    shape, dim = self._compute_shape(k, axis, self.input_data)
-    indices_out = Data(name="%s_indices_output" % self.name, shape=shape, dim=dim, sparse=True)
-    indices_out.placeholder = self.indices
-    indices_layer = InternalLayer(name="%s_indices" % self.name, network=self.network, output=indices_out)
-    self.indices_layer = indices_layer
+    self.output.size_placeholder.pop(self.axis, None)  # specified axis is now static
 
   @classmethod
   def get_out_data_from_opts(cls, name, sources, k, axis, **kwargs):
@@ -4232,7 +4233,13 @@ class TopKLayer(_ConcatInputLayer):
     :rtype: LayerBase|None
     """
     assert layer_name == "indices"
-    return self.indices_layer
+    full_layer_name = self.name + '/indices'
+    shape, dim = self._compute_shape(self.k, self.axis, self.input_data)
+    indices_out = Data(name="%s_indices_output" % self.name, shape=shape, dim=dim, sparse=True)
+    indices_out.placeholder = self.indices
+    indices_layer = InternalLayer(
+      name=full_layer_name, network=self.network, output=indices_out, sources=[self])
+    return indices_layer
 
   @staticmethod
   def _compute_shape(k, axis, input_data):
@@ -4269,10 +4276,7 @@ class TopKLayer(_ConcatInputLayer):
       batch_dim_axis=source_data.batch_dim_axis,
       time_dim_axis=source_data.time_dim_axis,
       sparse=True)
-    # TODO: if in subnet, return:
     return out, parent_layer_kwargs["network"], InternalLayer
-    # TODO: else:
-    # return out
 
 
 class GatherNdLayer(_ConcatInputLayer):
