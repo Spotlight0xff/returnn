@@ -1487,11 +1487,15 @@ def test_TopKLayer_basic():
   # we test the "top_k" layer
   with make_scope() as session:
     network = TFNetwork(config=Config(), extern_data=ExternData(), train_flag=True)
-    t_enc = 14
+    # t_enc = 14
     top_k = 6
+    n_batch = 4
+    n_times = [13, 13, 11, 7]
+    t_enc = max(n_times)
+    assert len(n_times) == n_batch
     weights = InternalLayer(
       name="weights", network=network, output=Data(
-        name="weights", shape=(t_enc, 1), time_dim_axis=None, auto_create_placeholders=True))
+        name="weights", shape=(None, 1), time_dim_axis=1, auto_create_placeholders=True))
     assert weights.output.batch_dim_axis == 0
     out_template = TopKLayer.get_out_data_from_opts(
       name="top_k", network=network, sources=[weights], axis=1, k=top_k)
@@ -1505,16 +1509,15 @@ def test_TopKLayer_basic():
     layer.output.sanity_check()
     assert layer.output.shape == (top_k, 1)
     assert layer.output.time_dim_axis == weights.output.time_dim_axis
-    n_batch = 5
-    n_times = [13, 13, 11, 7, 5]
-    assert len(n_times) == n_batch
-    n_time = max(n_times)
+    weights_np = numpy.random.normal(size=(n_batch, t_enc, 1)).astype("float32")
     feed_dict = {
-      weights.output.placeholder: numpy.random.normal(size=(n_batch, t_enc, 1)).astype("float32"),
-      weights.output.size_placeholder[1]: numpy.array(n_times, dtype="int32")}
+      weights.output.placeholder: weights_np,
+      weights.output.size_placeholder[0]: numpy.array(n_times, dtype="int32")}
     session.run(tf.global_variables_initializer())
-    layer_output = session.run([layer.output.placeholder], feed_dict=feed_dict)
-    assert layer_output[0].shape == (n_batch, top_k, 1)
+    layer_output = session.run([layer.output.placeholder], feed_dict=feed_dict)[0]
+    assert layer_output.shape == (n_batch, top_k, 1)
+    topk_np = -numpy.sort(-weights_np, axis=1)[:, :top_k, :]
+    numpy.testing.assert_array_almost_equal(layer_output, topk_np)
 
 
 def test_TopKLayer_indices():
@@ -1522,6 +1525,9 @@ def test_TopKLayer_indices():
   with make_scope() as session:
     t_enc = 14
     top_k = 6
+    n_batch = 4
+    n_times = [13, 13, 11, 7]
+    assert len(n_times) == n_batch
     config = Config({
       "extern_data": {
         "weights": {"dim": 1, "sparse": False}},
@@ -1533,20 +1539,14 @@ def test_TopKLayer_indices():
     network = TFNetwork(config=config, train_flag=True)
     network.construct_from_dict(config.typed_value("network"))
     assert "output" in network.layers
-    # check if the indices sublayer has been constructed
-    assert any([l.name == "top_k_indices" for l in LayerBase.get_global_layer_list()])
-    n_batch = 5
-    n_times = [13, 13, 11, 7, 5]
-    assert len(n_times) == n_batch
-    n_time = max(n_times)
     indices_layer = network.get_layer("top_k/indices")
     assert indices_layer.output.sparse is True
     top_k_layer = network.get_layer("top_k")
     assert indices_layer.output.batch_ndim == 3 and indices_layer.output.shape == (top_k, 1)
-    extern_data = network.extern_data
+    weights_np = numpy.random.normal(size=(n_batch, t_enc, 1)).astype("float32")
     feed_dict = {
-      extern_data.data["weights"].placeholder: numpy.random.normal(size=(n_batch, t_enc, 1)).astype("float32"),
-      extern_data.data["weights"].size_placeholder[0]: numpy.array(n_times, dtype="int32")
+      network.extern_data.data["weights"].placeholder: weights_np,
+      network.extern_data.data["weights"].size_placeholder[0]: numpy.array(n_times, dtype="int32")
     }
     session.run(tf.global_variables_initializer())
     layer_output, indices_output = session.run(
@@ -1554,10 +1554,8 @@ def test_TopKLayer_indices():
       feed_dict=feed_dict)
     assert layer_output.shape == indices_output.shape
     assert indices_output.shape == (n_batch, top_k, 1)
-
-# TODO
-def test_GatherNd():
-  pass
+    topk_indices_np = numpy.argsort(-weights_np, axis=1)[:, :top_k, :]
+    numpy.testing.assert_array_equal(indices_output, topk_indices_np)
 
 
 def test_TopK_GatherNd():
