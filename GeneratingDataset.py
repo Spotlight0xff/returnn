@@ -860,15 +860,19 @@ class CopyTaskDataset(GeneratingDataset):
   Input/output is exactly the same random sequence of sparse labels.
   """
 
-  def __init__(self, nsymbols, minlen=0, maxlen=0, minlen_epoch_factor=0, maxlen_epoch_factor=0, **kwargs):
+  def __init__(self, nsymbols, minlen=0, maxlen=0, minlen_epoch_factor=0, maxlen_epoch_factor=0, postfix=False, **kwargs):
     """
     :param int nsymbols:
     :param int minlen:
     :param int maxlen:
     :param float minlen_epoch_factor:
     :param float maxlen_epoch_factor:
+    :param bool postfix: if enabled, increase symbol count by one and add '0' as postfix to the seq
+                         '0' is then otherwise _not_ used in the sequence.
     """
     # Sparse data.
+    if postfix:
+      nsymbols += 1
     super(CopyTaskDataset, self).__init__(input_dim=nsymbols,
                                           output_dim={"data": (nsymbols, 1),
                                                       "classes": (nsymbols, 1)},
@@ -880,6 +884,7 @@ class CopyTaskDataset(GeneratingDataset):
     self.maxlen = maxlen
     self.minlen_epoch_factor = minlen_epoch_factor
     self.maxlen_epoch_factor = maxlen_epoch_factor
+    self.postfix = postfix
 
   def get_random_seq_len(self):
     """
@@ -897,7 +902,10 @@ class CopyTaskDataset(GeneratingDataset):
     :rtype: DatasetSeq
     """
     seq_len = self.get_random_seq_len()
-    seq = [self.random.randint(0, self.nsymbols) for _ in range(seq_len)]
+    if self.postfix:
+      seq = [self.random.randint(1, self.nsymbols-1) for _ in range(seq_len)] + [0]
+    else:
+      seq = [self.random.randint(0, self.nsymbols) for _ in range(seq_len)]
     seq_np = numpy.array(seq, dtype="int8")
     return DatasetSeq(seq_idx=seq_idx, features=seq_np, targets={"classes": seq_np})
 
