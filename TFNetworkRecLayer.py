@@ -4080,6 +4080,8 @@ class DecideLayer(LayerBase):
     if owner:
       final_search_choices.set_src_beams(tf.expand_dims(beam_idxs, axis=1))
       final_search_choices.set_beam_scores(tf.expand_dims(tf.gather_nd(beam_scores, indices=beam_idxs_ext), axis=1))
+    #output.placeholder = tf.Print(output.placeholder, ["decide", output.placeholder], summarize=300)
+    #final_search_choices.beam_scores = tf.Print(final_search_choices.beam_scores, ["final beam", final_search_choices.beam_scores], summarize=30)
     return output, final_search_choices
 
   @classmethod

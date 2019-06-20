@@ -2605,7 +2605,9 @@ class SoftmaxOverSpatialLayer(_ConcatInputLayer):
         idxs = tf.reshape(tf.range(energy_shape[axis]), idxs_shape)
         start_data = start.output.copy_compatible_to(
           energy_data, check_sparse=False, check_dtype=False)  # adds dummy time-dim
-        energy_mask = tf.logical_and(energy_mask, tf.greater_equal(start_data.placeholder, idxs))
+        # energy_mask = tf.Print(energy_mask, ["pre", energy_mask], summarize=10)
+        energy_mask = tf.logical_and(energy_mask, tf.greater_equal(idxs, start_data.placeholder))
+        # energy_mask = tf.Print(energy_mask, ["post", energy_mask], summarize=10)
       if window_start:
         assert window_size, "set window_size explicitly"
         from TFUtil import nd_indices, expand_dims_unbroadcast
@@ -6732,6 +6734,8 @@ class Loss(object):
         target_flat = check_shape_equal(self.target_flat, output_flat)
         target_label = tf.cast(tf.argmax(target_flat, axis=last_dim), tf.int32)
       output_label = tf.cast(tf.argmax(output_flat, axis=last_dim), target_label.dtype)
+      #output_label = tf.Print(output_label, ["output", output_label], summarize=50)
+      #target_label = tf.Print(target_label, ["target", target_label], summarize=50)
       not_equal = tf.not_equal(output_label, target_label)
       return self.reduce_func(tf.cast(not_equal, tf.float32))
 
@@ -7849,6 +7853,8 @@ class SearchScoreLoss(Loss):
     search_choices = self.layer.get_search_choices()
     assert self.layer.network.search_flag and search_choices, "no search?"
     # Negative score, because we minimize the loss, i.e. maximize the score.
+    #search_choices.beam_scores = tf.Print(search_choices.beam_scores,
+    #                                            ["search_choices", search_choices.beam_scores], summarize=30)
     return self.reduce_func(-search_choices.beam_scores)
 
   def get_error(self):
