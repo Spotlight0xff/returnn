@@ -2605,9 +2605,7 @@ class SoftmaxOverSpatialLayer(_ConcatInputLayer):
         idxs = tf.reshape(tf.range(energy_shape[axis]), idxs_shape)
         start_data = start.output.copy_compatible_to(
           energy_data, check_sparse=False, check_dtype=False)  # adds dummy time-dim
-        # energy_mask = tf.Print(energy_mask, ["pre", energy_mask], summarize=10)
         energy_mask = tf.logical_and(energy_mask, tf.greater_equal(idxs, start_data.placeholder))
-        # energy_mask = tf.Print(energy_mask, ["post", energy_mask], summarize=10)
       if window_start:
         assert window_size, "set window_size explicitly"
         from TFUtil import nd_indices, expand_dims_unbroadcast
@@ -2713,6 +2711,7 @@ class SeqLenMaskLayer(_ConcatInputLayer):
     energy_mask = expand_multiple_dims(
       energy_mask, [i for i in range(x.batch_ndim) if i not in [x.batch_dim_axis, axis]])  # e.g. (B,1,T) with axis=-1
     energy_mask = tf.logical_and(energy_mask, tf.ones_like(x.placeholder, dtype=energy_mask.dtype))
+    energy_mask = tf.Print(energy_mask, ["energy_mask", energy_mask], summarize=50)
     x_ = tf.where(energy_mask, x.placeholder, mask_value * tf.ones_like(x.placeholder), "energy_masked")
     self.output.placeholder = x_
     self.output.size_placeholder = x.size_placeholder.copy()
@@ -2792,7 +2791,57 @@ class RangeInAxisLayer(LayerBase):
     axis = out.get_axis_from_description(axis)
     axis_wo_b = out.get_batch_axis_excluding_batch(axis)
     out.shape = tuple([d if (i == axis_wo_b) else 1 for (i, d) in enumerate(out.shape)])
+    out.dim = 1
     out.dtype = dtype
+    return out
+
+
+class MonotonicMaskLayer(LayerBase):
+  """
+  Builds a tensor which masks out all non-monotonic positions.
+  e.g. for an input (B, T, D) it produces (B, T, T) with
+  """
+  layer_class = "monotonic_mask"
+  recurrent = True  # if axis=="T", the time-dim order matters
+
+  def __init__(self, **kwargs):
+    """
+    """
+    super(MonotonicMaskLayer, self).__init__(**kwargs)
+    from TFUtil import where_bc
+    import tensorflow as tf
+    axis = self.output.get_axis_from_description("t")
+    source = self.sources[0].output
+    source_shape = tf.shape(source.placeholder)
+    dim = source_shape[axis]
+    out = tf.expand_dims(tf.range(0, dim), axis=1)  # (T, 1)
+    out -= tf.expand_dims(tf.range(0, dim), axis=0)  # (T, T)
+    out = where_bc(out > 0, True, False)
+    out_shape = [1, dim, dim]
+    #out_shape = [dim if (i == axis) else 1 for i in range(self.output.batch_ndim)]
+    out = tf.reshape(out, out_shape)  # add missing axes (keep_dims)
+    #if unbroadcast:
+    #  out = out + tf.zeros(source_shape, dtype=out.dtype)
+    #out = tf.cast(out, dtype)
+    self.output.placeholder = out
+    #axis_wo_b = source.get_batch_axis_excluding_batch(axis)
+    self.output.size_placeholder = {0: dim, 1: dim}
+
+  @classmethod
+  def get_out_data_from_opts(cls, name, sources, **kwargs):
+    """
+    :param str name:
+    :param list[LayerBase] sources:
+    """
+    assert len(sources) == 1, "%s layer %r requires single source" % (cls, name)
+    out = sources[0].output.copy_template(name="%s_output" % name)
+    axis = out.get_axis_from_description("t")
+    axis_wo_b = out.get_batch_axis_excluding_batch(axis)
+    out.shape = tuple([out.shape[axis_wo_b], out.shape[axis_wo_b]])
+    #out.shape = tuple([d if (i  axis_wo_b) else 1 for (i, d) in enumerate(out.shape)])
+    #out.dim = 1
+    out.dim = None
+    out.dtype = "bool"
     return out
 
 
@@ -3655,7 +3704,7 @@ class SwapAxesLayer(_ConcatInputLayer):
     shape[axis1_wo_b], shape[axis2_wo_b] = shape[axis2_wo_b], shape[axis1_wo_b]
     out.shape = tuple(shape)
     if not out.sparse:
-      out.dim = out.shape[-1]
+      out.dim = out.batch_shape[out.feature_dim_axis]
     out.time_dim_axis = cls._translate_axis(out.time_dim_axis, axis1, axis2)
     if out.feature_dim_axis_or_unspecified is not NotSpecified:
       out.feature_dim_axis = cls._translate_axis(out.feature_dim_axis, axis1, axis2)

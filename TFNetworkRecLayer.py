@@ -1227,7 +1227,7 @@ class _SubnetworkRecCell(object):
       layer = self.input_layers_net.layers[layer_name]
       assert isinstance(layer, LayerBase)
       if not self.parent_rec_layer.output.is_same_time_dim(layer.output):
-        assert not prev, "Time dim does not match: RecLayer %s vs sub layer %s." % (self.parent_rec_layer, layer)
+        # assert not prev, "Time dim does not match: RecLayer %s (axis=%d) vs sub layer %s (axis=%d)." % (self.parent_rec_layer, self.parent_rec_layer.output.time_dim_axis, layer, layer.output.time_dim_axis)
         return layer
       output = layer.output.copy_template_excluding_time_dim()
       with tf.name_scope("%s_moved_input" % name.replace(":", "_")):
@@ -4010,6 +4010,8 @@ class ChoiceLayer(LayerBase):
     ls = super(ChoiceLayer, self).get_dep_layers()
     if self.explicit_search_sources:
       ls.extend(self.explicit_search_sources)
+    if self.targets:
+      ls.extend(self.targets)
     return ls
 
 

@@ -468,6 +468,9 @@ class TFNetwork(object):
     for layer_name in layer_list:
       # Always (re)create the specified layer in the layer_list.
       # However, any dependencies might resolve to the main net.
+      if layer_name not in net_dict:
+        # TODO: warning?
+        continue
       self.extra_net.construct_layer(net_dict=net_dict, name=layer_name, check_existing=False)
 
     if self.extra_net.recurrent:
@@ -979,6 +982,8 @@ class TFNetwork(object):
       if sub_layer:  # get_sub_layer returns None by default (if sub-layer not found)
         return sub_layer
     if layer_name not in self.layers:
+      if layer_name == "i":
+        print("now")
       raise LayerNotFound("layer %r not found in %r" % (layer_name, self))
     return self.layers[layer_name]
 
