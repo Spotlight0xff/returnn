@@ -982,8 +982,6 @@ class TFNetwork(object):
       if sub_layer:  # get_sub_layer returns None by default (if sub-layer not found)
         return sub_layer
     if layer_name not in self.layers:
-      if layer_name == "i":
-        print("now")
       raise LayerNotFound("layer %r not found in %r" % (layer_name, self))
     return self.layers[layer_name]
 

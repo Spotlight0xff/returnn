@@ -2623,6 +2623,7 @@ class SoftmaxOverSpatialLayer(_ConcatInputLayer):
         indices = expand_dims_unbroadcast(tf.range(window_len), energy_data.batch_dim_axis, n_batch)
         # time-major: (W,B) + (1,B), batch-major: (B, W) + (1,B)
         indices += tf.expand_dims(tf.to_int32(window_start), axis=axis)
+        indices.set_shape([tf.Dimension(None), tf.Dimension(None)])
         idxs = nd_indices(indices)
         mask_shape = energy_shape[:2]  # (T, B)
         mask_shape[axis] = window_len
@@ -6393,7 +6394,7 @@ class HDFDumpLayer(LayerBase):
     :param list[LayerBase] sources:
     :rtype: Data
     """
-    assert len(sources) == 1, "PrintLayer %r: expects exactly one source, but got: %r" % (name, sources)
+    assert len(sources) == 1, "HDFDumpLayer %r: expects exactly one source, but got: %r" % (name, sources)
     return sources[0].output.copy("%s_output" % name)
 
 
@@ -6775,6 +6776,15 @@ class Loss(object):
       output_flat = self.output_before_softmax_flat
       if output_flat is None:
         output_flat = self.output_flat
+      if self.output.sparse:
+        output = self.output.get_placeholder_as_batch_major()  # (B, T) -> int32
+        output_label = check_input_ndim(output, ndim=2)
+        assert self.target.sparse
+        target_label = check_input_ndim(self.target.get_placeholder_as_batch_major(), ndim=2)
+        fer = tf.count_nonzero(tf.not_equal(output_label, target_label), axis=1)  # (B,)
+        # 10 classes, want in percentage
+        fer = tf.Print(fer, ["FER%", tf.reduce_mean(tf.to_float(fer)/10. * 100.), tf.shape(fer), fer], summarize=9999)
+        return self.reduce_func(tf.to_float(fer))
       output_flat = check_input_ndim(output_flat, ndim=2)
       last_dim = tf.rank(output_flat) - 1  # should be 1
       if self.target.sparse:
@@ -7462,7 +7472,12 @@ class ExpectedLoss(Loss):
       # We currently expect that `losses` is of shape (batch*beam,), as we set reduce_func = identity,
       # and that self.losses is a sequence criterion.
       # This does not work for frame-wise criteria yet where we get (batch*beam*time') flattened.
+      # if self.losses.recurrent:  # sequence criterion
       losses = tf.reshape(losses, tf.shape(beam_scores), name="losses")  # (batch,beam)
+      #else:  # frame-wise criterion (batch, beam, time)
+      #  losses = tf.Print(losses, ["losses", tf.shape(losses), losses], summarize=20)
+      #  losses = tf.reshape(tf.reduce_sum(tf.reshape(losses, [1000,5,5]), axis=-1),
+      #                      tf.shape(beam_scores), name="losses")  # (batch,beam)
       corrected_losses = losses
       if self.norm_scores:
         scores_norm_shift = tf.reduce_logsumexp(

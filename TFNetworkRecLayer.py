@@ -1515,6 +1515,8 @@ class _SubnetworkRecCell(object):
         fixed_seq_len = rec_layer.output.size_placeholder[0]
       else:
         fixed_seq_len = None
+      if rec_layer._cheating and rec_layer.output.size_placeholder:
+        fixed_seq_len = rec_layer.output.size_placeholder[0]
       if fixed_seq_len is None and "end" not in self.layer_data_templates:
         # If 'end' layer is not existing, the length must be defined.
         # In some cases (training with given target) we know the target sequence length.
@@ -1531,8 +1533,8 @@ class _SubnetworkRecCell(object):
         assert "end" in self.layer_data_templates, "length not defined, provide 'end' layer"
         max_seq_len = None
         have_known_seq_len = False
-      if not rec_layer.input_data and output_template_search_choices:
-        assert not have_known_seq_len  # at least for the moment
+      # if not rec_layer.input_data and output_template_search_choices:
+      #   assert not have_known_seq_len  # at least for the moment
 
       common_data_len = None  # used to check whether all extern data have same length
       used_keys = self.net.used_data_keys.copy()
@@ -3467,7 +3469,7 @@ class ChoiceLayer(LayerBase):
   """
   layer_class = "choice"
 
-  _debug_out = None  # type: typing.Optional[list]
+  _debug_out = []  # type: typing.Optional[list]
 
   def __init__(self, beam_size,
                search=NotSpecified,
@@ -3550,6 +3552,7 @@ class ChoiceLayer(LayerBase):
         else:
           scores_in = self._get_scores(self.sources[0])  # (batch * beam_size, dim)
           scores_in_dim = self.sources[0].output.dim
+          # scores_in, pruned_labels = tf.nn.top_k(scores_in, k=beam_size)
           if scores_in_dim is None:  # can happen if variable length
             scores_in_dim = tf.shape(self.sources[0].output.placeholder)[self.sources[0].output.feature_dim_axis]
           pruned_labels = None
@@ -3624,7 +3627,7 @@ class ChoiceLayer(LayerBase):
               layer=self, scores_in=scores_in, scores_base=scores_base, t=t, end_flags=end_flags,
               batch_dim=net_batch_dim, scores_beam_in=scores_beam_in, base_beam_in=base_beam_in)
             assert isinstance(scores_comb, tf.Tensor)
-            scores_comb.set_shape((None, None, scores_in_dim))  # (batch, beam_in, dim)
+            # scores_comb.set_shape((None, None, scores_in_dim))  # (batch, beam_in, dim)
         else:
           scores_random_sample = None
           if random_sample_scale:
@@ -3635,6 +3638,15 @@ class ChoiceLayer(LayerBase):
             optional_mul(scores_in, prob_scale),
             optional_mul(scores_base, base_beam_score_scale),
             optional_mul(scores_random_sample, random_sample_scale))  # (batch, beam_in, dim)
+        scores_comb = tf.Print(scores_comb, ["net_batch_dim", net_batch_dim,
+                                             "base_beam_in", base_beam_in,
+                                             "scores_in_dim", scores_in_dim,
+                                             "scores_beam_in", scores_beam_in,
+                                             "scores_in", tf.shape(scores_in),
+                                             "scores_base", tf.shape(scores_base),
+                                             "scores_comb", tf.shape(scores_comb)])
+        # beam = tf.shape(sources_base)[1]
+        # scores_beam_in
         scores_comb_flat = tf.reshape(
           scores_comb, [net_batch_dim, base_beam_in * scores_in_dim])  # (batch, beam_in * dim)
         # `tf.nn.top_k` is the core function performing our search.
@@ -3667,6 +3679,7 @@ class ChoiceLayer(LayerBase):
           # target labels by indexing pruned_labels with 'labels'.
           labels = self._get_combined_labels(pruned_labels, source_beam_sizes, combined_ids=labels)
         else:
+          # this is only correct if we dont prune for single source
           labels = [labels]
 
         self.search_choices.set_beam_scores(scores)  # (batch, beam) -> log score
@@ -4010,8 +4023,6 @@ class ChoiceLayer(LayerBase):
     ls = super(ChoiceLayer, self).get_dep_layers()
     if self.explicit_search_sources:
       ls.extend(self.explicit_search_sources)
-    if self.targets:
-      ls.extend(self.targets)
     return ls
 
 
