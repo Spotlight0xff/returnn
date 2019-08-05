@@ -4014,7 +4014,9 @@ class OpCodeCompiler(NativeCodeCompiler):
     tf_include_nsync = tf_include + "/external/nsync/public"  # https://github.com/tensorflow/tensorflow/issues/2412
     include_paths = list(include_paths) + [tf_include, tf_include_nsync]
     ld_flags = list(ld_flags)
-    if have_min_tf_version((1, 4)):
+    if have_min_tf_version((1, 5)):
+      ld_flags += tf.sysconfig.get_link_flags()
+    elif have_min_tf_version((1, 4)):
       # https://github.com/tensorflow/tensorflow/issues/13607
       ld_flags += ["-L%s" % tf.sysconfig.get_lib(), "-ltensorflow_framework"]
     # noinspection PyUnresolvedReferences
