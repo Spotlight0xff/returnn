@@ -6399,6 +6399,7 @@ class TFArrayContainer(object):
     #include "tensorflow/core/platform/mutex.h"
     #include "tensorflow/core/platform/types.h"
     #include "tensorflow/core/common_runtime/device.h"
+    #include "tensorflow/core/public/version.h"
 
     using namespace tensorflow;
 
@@ -6440,7 +6441,11 @@ class TFArrayContainer(object):
     struct ArrayContainer : public ResourceBase {
       ArrayContainer(const DataType& dtype) : dtype_(dtype) {}
 
-      string DebugString() override { return "ArrayContainer"; }
+      string DebugString()
+#if (TF_MAJOR_VERSION >= 1 && TF_MINOR_VERSION >= 14)
+const
+#endif
+      override { return "ArrayContainer"; }
       int64 MemoryUsed() const override { return 0; };
 
       mutex mu_;
