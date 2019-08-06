@@ -26,7 +26,12 @@ def get_optimizer_class(class_name):
   :rtype: type[Optimizer]|()->Optimizer
   """
   if not _OptimizerClassesDict:
-    potential_list = list(vars(tf.train).items())
+    # We use `dir()` here instead of `vars()`, as in newer TF version (>=1.14)
+    # `tf.train` is wrapped using a separate class `DeprecationWrapper`.
+    # This  wrapper does not fill the `__dict__` property (which `vars()` uses),
+    # but fills `tf.train.__dir__` (which `dirs()` uses).
+    # So this way should work for all TF versions currently.
+    potential_list = [(name, getattr(tf.train, name)) for name in dir(tf.train)]
     if tf_version_tuple() >= (1, 2, 0):
       from tensorflow.contrib import opt
       potential_list += list(vars(opt).items())
