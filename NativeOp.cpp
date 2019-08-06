@@ -746,7 +746,11 @@ void* _malloc(size_t num_bytes) {
     //auto* stream = context->op_device_context()->stream();
     Allocator* allocator =
         context->device()->GetAllocator(AllocatorAttributes());
-    void* ptr = (void*)allocator->Allocate<uint8_t>(num_bytes);
+    #if (TF_MAJOR_VERSION == 1 && TF_MINOR_VERSION >= 14)
+    void* ptr = allocator->AllocateRaw(Allocator::kAllocatorAlignment, num_bytes);
+    #else
+    void* ptr = (void*) allocator->Allocate<uint8_t>(num_bytes);
+    #endif
     if(!ptr)
         context->CtxFailure(
             errors::InvalidArgument("NativeOp: cannot allocate ", num_bytes, " bytes on ", allocator->Name()));
