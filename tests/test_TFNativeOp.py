@@ -177,8 +177,8 @@ def test_NativeLstm2_compile():
 # Do this here such that we always see this log in Travis.
 try:
   sys.stdout = sys.__stdout__
-  print("travis_fold:start:script.nativelstm2compile")
-  test_NativeLstm2_compile()
+  # print("travis_fold:start:script.nativelstm2compile")
+  # test_NativeLstm2_compile()
 except Exception as exc:
   print("NativeLstm2 compile exception:", exc)
 finally:
@@ -2223,6 +2223,128 @@ def test_ctc_viterbi_loss():
     print("step %i, loss %f" % (step, loss_val))
     loss_vals.append(loss_val)
   assert loss_vals[-1] < loss_vals[0]
+
+
+def check_transducer_fsa(targets, target_seq_lens, n_classes):
+  """
+  :param numpy.ndarray targets: (B, U)
+  :param numpy.ndarray target_seq_lens: (B,)
+  :param int n_classes:
+  :param bool with_native_fsa:
+  :return: nothing, just checks
+  """
+  n_batch, n_target = targets.shape
+  # n_target = 5
+  # assert n_batch == len(target_seq_lens) and n_target == max(target_seq_lens)
+  # n_time = n_target_time * 3
+  n_time = n_target * 3
+  # logits, unnormalized, i.e. the values before softmax.
+  logits = numpy.random.RandomState(42).normal(size=(n_batch, n_time, n_target+1, n_classes)).astype("float32")
+  int_idx = numpy.zeros((n_time, n_batch), dtype="int32")
+  seq_lens = numpy.array([
+    n_time,
+    max(n_time - 4, (target_seq_lens[1] if (len(target_seq_lens) >= 2) else 0) + 1, 1),
+    max(n_time - 5, 1), max(n_time - 5, 1)],
+    dtype="int32")[:n_batch]
+  for t in range(n_time):
+    int_idx[t] = t < seq_lens
+  float_idx = int_idx.astype("float32")
+  blank_idx = n_classes - 1
+
+  # import Fsa
+  # fsa = Fsa.fast_transducer_lattice(seq_lens, target_seq_lens, targets,
+  #                                   blank_index=blank_idx, topology="rna")
+  # print(fsa.edges)
+  # for n in range(len(fsa.edges.T)):
+  #   edge = fsa.edges.T[n]
+  #   print("from=%2d to=%2d emission=%2d seq-idx=%2d" % (edge[0], edge[1], edge[2], edge[3]))
+  targets_tf = tf.constant(targets)
+  targets_seq_lens_tf = tf.constant(target_seq_lens)
+
+  # build RNA/CTC topo FSA
+  logits_tf = tf.constant(logits)
+  seq_lens_tf = tf.constant(seq_lens)
+
+  loss_tf = rna_loss(logits_tf, seq_lens_tf,
+                     targets=targets_tf, targets_seq_lens=targets_seq_lens_tf,
+                     blank_index=blank_idx)
+  loss = session.run(loss_tf)
+  print(loss)
+
+  # fwdbwd, obs_scores = _py_baum_welch(
+  #   am_scores=-_log_softmax(am_scores), float_idx=float_idx,
+  #   edges=edges, weights=weights, start_end_states=start_end_states)
+  # fwdbwd = numpy.exp(-fwdbwd)  # -log space -> prob space
+  # print(fwdbwd)
+  # print(obs_scores)
+
+  if False:
+    import TFNativeOp
+    native_edges_tf, native_weights_tf, native_start_end_states_tf = TFNativeOp.get_ctc_fsa_fast_bw(
+      targets=targets_tf, seq_lens=targets_seq_lens_tf, blank_idx=blank_idx)
+    native_edges, native_weights, native_start_end_states = session.run(
+      (native_edges_tf, native_weights_tf, native_start_end_states_tf))
+    # Note: The native FSA vs the Python FSA are not exactly identical
+    # (they just should be equivalent; although almost identical).
+    # We introduce a dummy state (last before end state), and some dummy edges.
+    print("native edges:")
+    print(native_edges)
+    print("native_start_end_states:")
+    print(native_start_end_states)
+
+    native_fwdbwd, native_obs_scores = _py_baum_welch(
+      am_scores=-_log_softmax(am_scores), float_idx=float_idx,
+      edges=native_edges, weights=native_weights, start_end_states=native_start_end_states)
+    native_fwdbwd = numpy.exp(-native_fwdbwd)  # -log space -> prob space
+    print(native_fwdbwd)
+    print(native_obs_scores)
+    for b in range(n_batch):
+      for t in range(seq_lens[b]):
+        numpy.testing.assert_almost_equal(fwdbwd[t, b], native_fwdbwd[t, b], decimal=5)
+    for b in range(n_batch):
+      numpy.testing.assert_almost_equal(obs_scores[b], native_obs_scores[b], decimal=5)
+    fwdbwd = native_fwdbwd
+    obs_scores = native_obs_scores
+
+  # from TFUtil import sparse_labels
+  # targets_sparse_tf = sparse_labels(targets_tf, targets_seq_lens_tf)
+  # am_scores_tf = tf.constant(am_scores)
+  # seq_lens_tf = tf.constant(seq_lens)
+  # inputs are unnormalized. tf.nn.ctc_loss does softmax internally.
+  # call pure-TF impl
+  # ref_ctc_loss_tf = tf.nn.ctc_loss(
+  #  labels=targets_sparse_tf,
+  #  inputs=am_scores_tf, sequence_length=seq_lens_tf, time_major=True, ctc_merge_repeated=label_loop)
+  # See grad definition of CTCLoss.
+  # The op will calculate the gradient w.r.t. the logits (log softmax).
+  # I.e. with y = softmax(z), this is \partial loss / \partial z = y - soft_align.
+  # Also see CtcLoss.get_soft_alignment.
+  # ref_ctc_loss_grad_tf = ref_ctc_loss_tf.op.outputs[1]  # time major, i.e. (time, batch, dim)
+  # y_tf = tf.nn.softmax(am_scores)  # (time, batch, dim)
+  # soft_align_tf = y_tf - ref_ctc_loss_grad_tf
+  # soft_align_tf.set_shape(tf.TensorShape((None, None, n_classes)))
+  # ref_fwdbwd, ref_obs_score = session.run((soft_align_tf, ref_ctc_loss_tf))
+  # print(ref_fwdbwd)
+  # print(ref_obs_score)
+
+  # for b in range(n_batch):
+  #   for t in range(seq_lens[b]):
+  #     numpy.testing.assert_almost_equal(fwdbwd[t, b], ref_fwdbwd[t, b], decimal=5)
+  # for b in range(n_batch):
+  #   numpy.testing.assert_almost_equal(obs_scores[0, b], ref_obs_score[b], decimal=5)
+
+
+def test_rna_fullsum_batch3_len6_c8():
+  """
+  This (:func:`Fsa.get_ctc_fsa_fast_bw`) is used by :func:`ctc_loss`.
+  """
+  targets = numpy.array([
+    [1, 3, 4, 2, 1],
+    [2, 6, 3, 4, 0],
+    [0, 3, 2, 0, 0]], dtype="int32")
+  target_seq_lens = numpy.array([5, 4, 3], dtype="int32")
+  n_classes = 8  # +1 because of blank
+  check_transducer_fsa(targets=targets, target_seq_lens=target_seq_lens, n_classes=n_classes)
 
 
 def test_edit_distance():

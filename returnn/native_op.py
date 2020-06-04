@@ -5028,6 +5028,424 @@ class GetCtcFsaFastBwOp(NativeOpGenBase):
   """
 
 
+class FastTransducerTSLossOp(NativeOpGenBase):
+  """
+  We compute the Transducer Full-Sum loss by first constructing a graph lattice (2D grid),
+  which is precomputed (`edges`, `weights`=0, `start_end_states`).
+  Internally, this lattice (T, U) is represented as T*U states.
+  For RNN-T topology (U-1 targets, T timesteps):
+
+  U
+  ^ 3-->6-->9
+  | ^   ^   ^
+  | |   |   |
+  | 2-->5-->8
+  | ^   ^   ^
+  | |   |   |
+  | 1-->4-->7
+  L__________> T
+
+  Then this graph is "flattened" to 1-->2-->3-->4... (with all the edges intact)
+
+  inputs:
+    :param scores: scores in -log space. 4d (batch,time,target,dim)
+    :param edges: edges of the graph (from,to,emission_idx,sequence_idx)
+    :param weights: weights of the edges
+  outputs:
+    :param output: RNA-like alignment
+  """
+
+  in_info = (
+    {"name": "logp",       "ndim": 4, "shape": (None, None, None, 2),
+                                      "need_contiguous": True, "gradient": "disconnected"},
+    {"name": "len_t",        "ndim": 1, "shape": (None,), "dtype": "int32",
+                                        "need_contiguous": True, "gradient": "disconnected"},
+    {"name": "len_u",        "ndim": 1, "shape": (None,), "dtype": "int32",
+                                        "need_contiguous": True, "gradient": "disconnected"},
+    {"name": "targets",      "ndim": 2, "shape": (None, None), "dtype": "int32",
+                                        "need_contiguous": True, "gradient": "disconnected"},
+    {"name": "state_buffer", "ndim": 3, "shape": (2,      None, None),
+                                        "need_contiguous": True, "gradient": "disconnected"}
+  )
+  out_info = (
+    {"name": "output", "ndim": 4, "shape": ((0, 0), (0, 1), (0, 2), (0, 3)), "need_contiguous": True },
+    {"name": "sums",   "ndim": 1, "shape": ((0, 1),),         "need_contiguous": True },
+  )
+
+  c_extra_support_code = copy.copy(common_fast_bw_kernels)
+  c_extra_support_code.update({
+    "100_init_bwd_state_buffer": """
+      DEF_KERNEL
+      void init_bwd_state_buffer(float* states, unsigned* end_states, unsigned t, unsigned max_t, float* index, unsigned index_stride) {
+        unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (index[t * index_stride + idx] == 1.0 && (t == max_t || index[(t + 1) * index_stride + idx] == 0.0)) {
+          unsigned state_idx = end_states[idx];
+          states[state_idx] = 0.0;
+        }
+      }
+    """,
+    "101_next_frame":  """
+      DEF_KERNEL
+      void next_frame(bool fwd, unsigned num_edges, unsigned  num_emissions,
+                      unsigned* sequence_idxs, unsigned* from_buffer, unsigned* to_buffer, float* weight_buffer, unsigned* emission_idxs,
+                      float* prev_frame, float* next_frame, float* logp, float* edge_buffer) {
+        unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= num_edges) {
+          return;
+        }
+        //fprintf(stderr, "idx < num_edges: %d < %d\\n", idx, num_edges);
+
+        unsigned from     = from_buffer  [idx];
+        float    prev_val = prev_frame[from];
+        if (isinf(prev_val)) {
+          edge_buffer[idx] = INF_F;
+          return;
+        }
+        fprintf(stderr, "isinf(%f)=false for from[idx=%d]=%d\\n", prev_val, idx, from);
+
+        unsigned to           = to_buffer    [idx];
+        unsigned emission_idx = emission_idxs[idx];
+        float    edge_weight  = weight_buffer[idx];
+        unsigned sequence_idx = sequence_idxs[idx];
+
+        if (fwd) {
+          fprintf(stderr, "idx=%3d: from=%3d to=%3d emission_idx=%3d seq-idx=%2d\\n",
+                  idx, from, to, emission_idx, sequence_idx);
+          //fprintf(stderr, "a(%2d, %2d) = a(%2d, %2d) * p(y_%2d|%2d, %2d)",
+          //                to, 0, from, 0, )
+        }
+
+        float val = prev_val + edge_weight + logp[sequence_idx * num_emissions + emission_idx];
+        // edge1:  a(t, u) = a(t-1, u)   * p(blank|t-1, u)
+        // edge2:  a(t, u) = a(t-1, u-1) * p(y    |t-1, u-1)
+        // float val = prev_val + logp[sequence_idx*num_emission + emission_idx]
+
+
+        if (fwd) {
+          edge_buffer[idx] += val;
+        }
+        else {
+          edge_buffer[idx] += prev_val;
+        }
+        atomic_prob_add(next_frame + to, val);
+      }
+    """,
+    "102_normalize": """
+      DEF_KERNEL
+      void normalize(float* buffer, unsigned* sequence_idxs, unsigned num_edges, unsigned num_seqs, float* sum_output) {
+        DEF_SHARED(float, sum);
+
+        buffer += blockIdx.x * num_edges;
+
+        for (unsigned s = 0u; s < num_seqs; s++) {
+          sum[s] = INF_F;
+        }
+
+        for (unsigned e = 0u; e < num_edges; e++) {
+          unsigned s = sequence_idxs[e];
+          sum[s] = prob_add(sum[s], buffer[e]);
+        }
+
+        for (unsigned s = 0ul; s < num_seqs; s++) {
+          if (isinf(sum[s])) {
+            // if the frame is empty (happens due to batching of seqs with unequal length), set it to 0
+            sum_output[blockIdx.x * num_seqs + s] = 0.0;
+          }
+          else {
+            sum_output[blockIdx.x * num_seqs + s] = sum[s];
+          }
+        }
+
+        for (unsigned e = 0u; e < num_edges; e++) {
+          unsigned s = sequence_idxs[e];
+          buffer[e] -= sum[s];
+        }
+      }
+    """,
+    "103_compute_result": """
+      DEF_KERNEL
+      void compute_result(float* state_buffer, int32* len_t, int32* len_u,
+                          unsigned buffer_stride, unsigned n_seqs, float* sum_output) {
+        unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+        if (idx >= n_seqs) {
+          return;
+        }
+
+        unsigned t = len_t[idx];
+        unsigned u = len_u[idx];
+        sum_output[idx] = state_buffer[idx*buffer_stride+u];
+        fprintf(stderr, "log likelihood for [B=%2d, T=%2d, U=%2d] = %.3f\\n", idx, t, u, sum_output[idx]);
+      }
+    """,
+    "104_next_frame_rna": """
+      DEF_KERNEL
+      void next_frame_rna(bool fwd, unsigned timestep, int32* len_t, int32* len_u, unsigned sequence_stride,
+                          unsigned target_stride, unsigned num_targets, float* scores_t,
+                          float* alphas_prev, float* alphas_next, unsigned buffer_stride) {
+        unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+        unsigned seq_idx = blockIdx.x;
+        unsigned target_idx = threadIdx.x;
+
+        if (target_idx > len_u[seq_idx] || timestep < target_idx) {
+          return;
+        }
+
+        // a(t, u) = a(t-1, u  ) * p(blank|t-1, u  )
+        //         + a(t-1, u-1) * p(y[u-1]    |t-1, u-1)
+        // alphas_prev: (B, U)
+        // scores_prev: (B, U, 2)
+        float blank_alpha = alphas_prev[seq_idx*buffer_stride+target_idx];
+        float blank_lp = scores_t[seq_idx*sequence_stride+target_idx*target_stride+1];
+        float blank =  blank_alpha + blank_lp;
+        float val = blank;
+        fprintf(stderr, "[B=%2d, u=%2d] blank=%.3f (a=%.3f + lp=%.3f)\\n", seq_idx, target_idx,
+        blank, blank_alpha, blank_lp);
+
+        if (target_idx > 0) {
+          float emit_lp = scores_t[seq_idx*sequence_stride+(target_idx-1)*target_stride+0];
+          float emit_alpha = alphas_prev[seq_idx*buffer_stride+(target_idx-1)];
+          float emit = emit_alpha + emit_lp;
+           fprintf(stderr, "[B=%2d, u=%2d] emit=%.3f (alpha=%.3f + lp=%.3f)\\n", seq_idx, target_idx, emit,
+                   emit_alpha, emit_lp);
+           val = prob_add(blank, emit);
+           fprintf(stderr, "[B=%2d, u=%2d] val=%.3f (blank=%.3f, emit=%.3f)\\n", seq_idx, target_idx, val, blank, emit);
+          if (timestep == target_idx) {  // no blank, only emit, t>0
+            alphas_next[seq_idx*buffer_stride+target_idx] = emit;
+            fprintf(stderr, "\\n");
+            return;
+          }
+        }
+        fprintf(stderr, "\\n");
+        alphas_next[seq_idx*buffer_stride+target_idx] = val;
+        return;
+      }
+    """,
+    "110_write_alignment_to_file": """
+      void write_alignment_to_file(float* d_state_buffer, float* d_index, unsigned index_stride,
+                                   unsigned* d_start_states, unsigned* d_end_states,
+                                   float pruning, unsigned n_frames, unsigned n_seqs, unsigned n_states, unsigned batch_idx) {
+        std::vector<float>    state_buffer((n_frames + 1u) * n_states);
+        std::vector<float>    index       (n_frames * index_stride);
+        std::vector<unsigned> start_states(n_seqs);
+        std::vector<unsigned> end_states  (n_seqs);
+
+        //HANDLE_ERROR(cudaMemcpy(state_buffer.data(), d_state_buffer, state_buffer.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        //HANDLE_ERROR(cudaMemcpy(index.data(),        d_index,        index.size()        * sizeof(float), cudaMemcpyDeviceToHost));
+        //HANDLE_ERROR(cudaMemcpy(start_states.data(), d_start_states, start_states.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        //HANDLE_ERROR(cudaMemcpy(end_states.data(),   d_end_states,   end_states.size()   * sizeof(float), cudaMemcpyDeviceToHost));
+
+        for (unsigned seq = 0u; seq < n_seqs; seq++) {
+          std::stringstream filename;
+          filename << "alignment.dump." << batch_idx << '.' << seq;
+          std::ofstream out(filename.str().c_str(), std::ios::out | std::ios::trunc);
+          for (unsigned t = 0u; t <= n_frames; t++) {
+            if (t > 0u && index[seq * index_stride + t] <= 0.0) {
+              break;
+            }
+            float sum = std::numeric_limits<float>::infinity();
+            for (unsigned s = start_states[seq]; s <= end_states[seq]; s++) {
+              const float val = state_buffer[t * n_states + s];
+              float diff = val - sum;
+              if (!isnan(diff)) {
+                sum = -log1p(exp(-abs(diff))) + fminf(sum, val);
+              }
+            }
+            for (unsigned s = start_states[seq]; s <= end_states[seq]; s++) {
+              const float val = state_buffer[t * n_states + s] - sum;
+              if (val <= pruning) {
+                out << t << ' ' << (s - start_states[seq]) << ' ' << val << '\\n';
+              }
+            }
+          }
+        }
+      }
+    """,
+    "111_write_output_to_file": """
+      void write_output_to_file(float* d_out, float* d_index, unsigned index_stride,
+                                float pruning, unsigned n_frames, unsigned n_seqs, unsigned n_emissions, unsigned batch_idx) {
+        std::vector<float> buffer(n_frames * n_seqs * n_emissions);
+        std::vector<float> index (n_frames * index_stride);
+
+        //HANDLE_ERROR(cudaMemcpy(buffer.data(), d_out,   buffer.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        //HANDLE_ERROR(cudaMemcpy(index.data(),  d_index, index.size()  * sizeof(float), cudaMemcpyDeviceToHost));
+
+        for (unsigned seq = 0u; seq < n_seqs; seq++) {
+          std::stringstream filename;
+          filename << "target.dump." << batch_idx << '.' << seq;
+          std::ofstream out(filename.str().c_str(), std::ios::out | std::ios::trunc);
+          for (unsigned t = 0u; t <= n_frames; t++) {
+            if (t > 0u && index[seq * index_stride + t] <= 0.0) {
+              break;
+            }
+            for (unsigned e = 0u; e < n_emissions; e++) {
+              const float val = buffer[t * n_seqs * n_emissions + seq * n_emissions + e];
+              if (val <= pruning) {
+                out << t << ' ' << e << ' ' << val << '\\n';
+              }
+            }
+          }
+        }
+      }
+    """,
+  })
+
+  c_fw_code = """
+    // logp, len_T, len_U, index, state_buffer* = input_names (*: inplace)
+    // output = output_names
+    assert(n_inputs  == 5);
+    assert(n_outputs == 2);
+    Ndarray* logp             = inputs[0];  // (T, B, U+1, 2) where last-dim is [label;blank]
+
+    Ndarray* seqlen_T         = inputs[1];  // (B,)
+    Ndarray* seqlen_U         = inputs[2];  // (B,)
+    Ndarray* targets          = inputs[3];  // (B, U)
+    Ndarray* state_buffer     = inputs[4];  // (2, B, U+1)
+    Ndarray* out              = *outputs[0];
+    Ndarray* sum_output       = *outputs[1];
+
+
+    debug_print(context, logp, "logp");
+
+    assert_cmp(Ndarray_DIMS(logp)[0], ==, Ndarray_DIMS(out)[0]);  // time
+    assert_cmp(Ndarray_DIMS(logp)[1], ==, Ndarray_DIMS(out)[1]);  // batch
+    assert_cmp(Ndarray_DIMS(logp)[2], ==, Ndarray_DIMS(out)[2]);  // target
+    assert_cmp(Ndarray_DIMS(logp)[3], ==, Ndarray_DIMS(out)[3]);  // dim/vocab
+
+    assert_cmp(Ndarray_DIMS(logp)[1], ==, Ndarray_DIMS(targets)[0]);  // batch
+    // assert_cmp(Ndarray_DIMS(logp)[2], ==, Ndarray_DIMS(targets)[1]);  // target
+
+    assert_cmp(Ndarray_DIMS(sum_output)[0], ==, Ndarray_DIMS(logp)[1]);  // batch
+
+    assert_cmp(Ndarray_DIMS(logp)[1], ==, Ndarray_DIMS(seqlen_T)[0]);  // batch
+    assert_cmp(Ndarray_DIMS(logp)[1], ==, Ndarray_DIMS(seqlen_U)[0]);  // batch
+
+    static unsigned batch_idx  = 0u;
+    bool store_alignment = false;
+
+
+    float*    d_logp            = Ndarray_DEV_DATA(logp);
+    float*    d_state_buffer_prev = Ndarray_DEV_DATA(state_buffer) + 0 * Ndarray_STRIDE(state_buffer, 0);
+    float*    d_state_buffer_next = Ndarray_DEV_DATA(state_buffer) + 1 * Ndarray_STRIDE(state_buffer, 0);
+    float*    d_out               = Ndarray_DEV_DATA(out);
+    float*    d_sum_output        = Ndarray_DEV_DATA(sum_output);
+    int32*   d_len_t = Ndarray_DEV_DATA_int32(seqlen_T);
+    int32*   d_len_u = Ndarray_DEV_DATA_int32(seqlen_U);
+
+    unsigned n_frames    = Ndarray_DIMS(logp)[0];
+    unsigned n_seqs    = Ndarray_DIMS(logp)[1];
+    unsigned n_targets   = Ndarray_DIMS(logp)[2];
+    unsigned n_vocab     = Ndarray_DIMS(logp)[3];
+    assert_cmp(n_vocab, ==, 2);  // [label;blank]
+
+    // For `N` seqs with (T, U, V) logp,
+    // we start N threadblocks of size U for each t in T.
+
+    unsigned n_threads   = 1024u;
+    // unsigned n_blocks    = (n_seqs + n_threads - 1) / n_threads;
+    unsigned n_blocks = n_seqs;
+
+    unsigned frame_stride    = Ndarray_STRIDE(logp, 0);
+    unsigned sequence_stride = Ndarray_STRIDE(logp, 1);
+    unsigned target_stride   = Ndarray_STRIDE(logp, 2);
+
+    assert(n_frames > 0);
+    std::cerr << "B=" << n_seqs << ", T=" << n_frames << ", U=" << n_targets << ", V=" << n_vocab << std::endl;
+    std::cerr << "n_threads: "   << n_threads   << std::endl;
+    std::cerr << "n_blocks: "    << n_blocks    << std::endl;
+
+    std::cerr << "frame_stride: "     << frame_stride    << std::endl;
+    std::cerr << "sequence_stride: " << sequence_stride << std::endl;
+    std::cerr << "target_stride: " << target_stride << std::endl;
+
+
+
+
+    unsigned n_fill_blocks = ((n_targets+1)*n_seqs + n_threads - 1u) / n_threads;
+    start_dev_kernel2(fill_array, n_fill_blocks, n_threads, 0,
+                     (d_state_buffer_prev, 0, (n_targets+1)*n_seqs));
+    HANDLE_LAST_ERROR();
+
+
+    // fwd pass
+    // this assumes that all kernel launches are executed synchronously.
+    for (unsigned t = 1u; t < n_frames+1; t++) {
+      std::cerr << "timestep: " << t << std::endl;
+
+      // We don't clear the buffer, which is important:
+      // due to batching of seqs with diff lengths, alpha(T,U) is in different columns,
+      // but we can simply copy (i.e. not overwrite) the buffers.
+      // start_dev_kernel2(fill_array, n_fill_blocks, n_threads, 0, (d_state_buffer_next, 0, n_targets*n_seqs));
+      // HANDLE_LAST_ERROR();
+
+
+      start_dev_kernel2(next_frame_rna, n_blocks, n_threads, 0,
+        (true,              // fwd
+        t,
+        d_len_t,
+        d_len_u,
+        sequence_stride,
+        target_stride,
+        n_targets,           // num_states
+        d_logp+(t-1)*frame_stride,  // scores_t
+        d_state_buffer_prev,  // alphas_prev
+        d_state_buffer_next,   // alphas_next
+        Ndarray_STRIDE(state_buffer, 2)  // == n_seqs == B
+        ));
+      HANDLE_LAST_ERROR();
+
+      std::swap(d_state_buffer_prev, d_state_buffer_next);
+    }
+
+    std::cerr << "fwd-pass: done." << std::endl;
+    // get log likelihoods
+    n_blocks = (n_seqs + n_threads - 1u) / n_threads;  // thread-idx == seq-idx
+    start_dev_kernel2(compute_result, n_blocks, n_threads, 0,
+      (
+      d_state_buffer_prev,  // last written buffer  (B, U)
+      d_len_t,
+      d_len_u,
+      Ndarray_STRIDE(state_buffer, 2),  // == n_seqs == B,
+      n_seqs,
+      d_sum_output  // (B,)
+      ));
+    HANDLE_LAST_ERROR();
+
+
+    // bwd pass
+    //for (unsigned t = n_frames; t > 0; t--) {
+    //  std::swap(d_state_buffer_prev, d_state_buffer_next);
+    //}
+
+
+
+    // compute gradients
+
+
+    // normalize at each time frame
+    // TODO: we don't do this currently, but maybe we should.
+    // start_dev_kernel2(normalize, n_frames, 1, n_seqs * sizeof(float),
+    //   (d_edge_buffer, d_sequence_idxs, n_edges, n_seqs, d_sum_output));
+    // HANDLE_LAST_ERROR();
+
+    #if TENSORFLOW
+    // Certain TensorFlow code doesn't like inf, even if it is just the CheckNumerics,
+    // which is helpful for debugging.
+    // We replace it by a very high number, so that tf.exp(-out) will still result in 0.0.
+    //n_blocks = (n_frames * n_seqs * n_emissions + n_threads - 1u) / n_threads;
+    //start_dev_kernel2(remove_inf, n_blocks, n_threads, 0, (d_out, n_frames * n_seqs * n_emissions));
+    //debug_print(context, out, "out");
+    #endif
+
+    //if (d_state_buffer_prev != NULL) {
+    //device_free(d_state_buffer_prev);
+    //}
+    //device_free(d_state_buffer_next);
+    batch_idx++;
+  """
+
+  c_bw_code = None
+
+
 class EditDistanceOp(NativeOpGenBase):
   # noinspection PyUnresolvedReferences
   """

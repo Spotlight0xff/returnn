@@ -1206,6 +1206,113 @@ def _unchunk_grad(op, *output_grads):
   return x_grad, None, None, None, None, None
 
 
+def make_fast_transducer_timesync_op(**kwargs):
+  """
+  :return: op
+  :rtype: (tf.Tensor) -> tuple[tf.Tensor]
+  """
+  maker = OpMaker(OpDescription.from_gen_base(NativeOp.FastTransducerTSLossOp), **kwargs)
+  return maker.make_op()
+
+
+def fast_transducer_loss(scores, len_T, len_U, targets, state_buffer=None):
+  """
+  :param tf.Tensor scores: (time, batch, targets, dim), in -log space
+  :param tf.Tensor state_buffer: (2, num_states)
+  :return: (fwdbwd, obs_scores), fwdbwd is (time, batch, target, dim), obs_scores is (time, batch), in -log space
+  :rtype: (tf.Tensor, tf.Tensor)
+  """
+  # edges, weights, start_end_states, state_buffer = SprintAlignmentAutomataOp(self.sprint_opts)(self.network.tags)
+  op = make_fast_transducer_timesync_op()
+  n_batch = tf.shape(scores)[1]
+  num_states = tf.shape(scores)[2]
+  # if state_buffer is None:
+  state_buffer = tf.zeros((2, n_batch, num_states + 1))
+  fwdbwd, obs_scores = op(scores, len_T, len_U, targets, state_buffer)
+  return fwdbwd, obs_scores
+
+
+def rna_loss(logits, logits_seq_lens, targets, targets_seq_lens,
+             blank_index, label_rep=False):
+  """
+  Computes the transducer loss for an time-sync model.
+  Also see :func:`ctc_loss`.
+
+  The blank index is the last item in the vocabulary.
+
+  :param tf.Tensor logits: (B, T, U+1, V) (un-normalized)
+  :param tf.Tensor logits_seq_lens: shape (B,) of int32|int64
+  :param tf.Tensor targets: batch-major, (B,U)
+  :param tf.Tensor targets_seq_lens: (B,)
+  :param bool label_rep: allows for output label repetition
+  :return: loss, shape (batch,)
+  :rtype: tf.Tensor
+  """
+  assert not label_rep, "not implemented"
+  assert logits.get_shape().ndims == 4 and logits.get_shape().dims[-1].value
+  n_batch = logits.get_shape().dims[0].value
+  n_time = logits.get_shape().dims[1].value
+  n_targets = logits.get_shape().dims[2].value
+  # n_vocab = logits.get_shape().dims[3].value
+  # n_targets = targets.get_shape().dims[1].value
+  # log_sm = tf.nn.log_softmax(logits)  # (B, T, U, V)
+  log_sm = logits
+  # from TFUtil import sequence_mask_time_major, where_bc
+  batchs, rows, cols = tf.meshgrid(
+    tf.range(n_batch),
+    tf.range(n_time),
+    tf.range(n_targets),
+    indexing='ij'
+  )
+  targets_exp_filed = tf.tile(targets[:, tf.newaxis, :], [1, n_time, 1])  # (B, T, U)
+  # such that the dimensions align, the last target (0) will never be accessed.
+  targets_exp_filed = tf.concat([targets_exp_filed, tf.zeros((n_batch, n_time, 1), dtype=tf.int32)], axis=-1)  # (B, T, U+1)
+  lp_y_idxs = tf.stack([batchs,
+                        rows,
+                        cols,
+                        targets_exp_filed
+                        ], axis=-1)  # (B, T, U, 4)
+  lp_blank_idxs = tf.stack([
+    batchs, rows, cols,
+    tf.ones((n_batch, n_time, n_targets), dtype=tf.int32)*blank_index
+  ], axis=-1)
+
+  # TODO: combine both gather_nd calls.
+
+  lp_y = tf.gather_nd(log_sm, lp_y_idxs)  # (B, T, U)
+  lp_y = tf.Print(lp_y, ["lp_y:", lp_y, lp_y.shape], summarize=-1)
+  lp_blank = tf.gather_nd(log_sm, lp_blank_idxs)  # (B, T, U)
+
+  lp_gather = tf.stack([lp_y, lp_blank], axis=-1)  # (B, T, U, 2)
+  # better time-first for time-sync algorithm
+  lp_gather_t = tf.transpose(lp_gather, [1, 0, 2, 3])  # (T, B, U, 2)
+  fwdbwd, obs_scores = fast_transducer_loss(
+    scores=-lp_gather_t, len_T=logits_seq_lens, len_U=targets_seq_lens,
+    targets=targets)
+  loss = obs_scores  # (batch,)
+  n_batch = tf.shape(loss)[0]
+  bw = tf.transpose(tf.exp(-fwdbwd), [1, 0, 2, 3])  # (B, T, U, V)
+  # if grad_wrt_softmax_in:
+  #  grad_x = tf.exp(log_sm) - bw  # (time,batch,dim)
+  # else:
+  #  grad_x = -bw  # (time,batch,dim)
+  from TFUtil import custom_gradient, where_bc, sequence_mask
+  # TODO we need to do the seq-mask over both T and U
+  seq_mask_t = tf.expand_dims(sequence_mask(logits_seq_lens, maxlen=n_time), axis=-1)  # (B, T, 1)
+  seq_mask_u = tf.expand_dims(sequence_mask(targets_seq_lens, maxlen=n_targets), axis=1)  # (B, 1, U)
+  seq_mask = tf.logical_and(seq_mask_t, seq_mask_u)  # (B, T, U)
+  grad_x_stacked = -bw  # (B, T, U, 2)
+  # probably memory-inefficient:
+  grad_x = tf.scatter_nd(lp_y_idxs, grad_x_stacked[..., 0], tf.shape(logits))
+  grad_x += tf.scatter_nd(lp_blank_idxs, grad_x_stacked[..., 1], tf.shape(logits))
+  grad_x = where_bc(tf.expand_dims(seq_mask, axis=-1), grad_x, 0.0)
+
+  loss = tf.reshape(loss, [n_batch, 1, 1, 1])  # (1,batch,1), such that we can broadcast to logits/grad_x
+  loss = custom_gradient.generic_loss_and_error_signal(loss=loss, x=logits, grad_x=grad_x)
+  loss = tf.reshape(loss, [n_batch])
+  return loss
+
+
 def make_fast_baum_welch_op(**kwargs):
   """
   :return: op
@@ -1282,6 +1389,41 @@ def tf_fast_bw_fsa_staircase(seq_lens, **opts):
     [seq_lens],
     [tf.int32, tf.float32, tf.int32],
     stateful=False)
+  # edges: (4, num_edges), edges of the graph (from,to,emission_idx,sequence_idx)
+  # weights: (num_edges,), weights of the edges
+  # start_end_states: (2, batch), (start,end) state idx in automaton.
+  edges.set_shape((4, None))
+  weights.set_shape((None,))
+  start_end_states.set_shape((2, None))
+  return edges, weights, start_end_states
+
+
+def tf_fast_transducer_lattice(seq_lens, target_seq_lens, targets, blank_index):
+  """
+  :param tf.Tensor seq_lens: shape (batch,)
+  :param tf.Tensor target_seq_lens: shape (batch,)
+  :param tf.Tensor targets: shape (batch, target)
+  :param tf.Tensor|int blank_index:
+  :return: edges, weights, start_end_states
+  :rtype: (tf.Tensor, tf.Tensor, tf.Tensor)
+  """
+  from Fsa import fast_transducer_lattice
+
+  def py_fast_transducer_lattice_wrapper(seq_lens_, target_seq_lens_, targets_, blank_index_):
+    """
+    :param numpy.ndarray seq_lens_:
+    :rtype: (numpy.ndarray,numpy.ndarray,numpy.ndarray)
+    """
+    fsa = fast_transducer_lattice(seq_lens_, target_seq_lens_, targets_, blank_index_)
+    assert fsa.start_end_states.shape == (2, len(seq_lens_)), "shape mismatch %r, n_batch %r, seq lens %r" % (
+      fsa.start_end_states.shape, len(seq_lens_), seq_lens_)
+    return fsa.edges.astype("int32"), fsa.weights.astype("float32"), fsa.start_end_states.astype("int32")
+
+  edges, weights, start_end_states = tf.py_func(
+    py_fast_transducer_lattice_wrapper,
+    [seq_lens, target_seq_lens, targets, blank_index],
+    [tf.int32, tf.float32, tf.int32],
+    stateful=False, name="fast_transducer_lattice_wrapper")
   # edges: (4, num_edges), edges of the graph (from,to,emission_idx,sequence_idx)
   # weights: (num_edges,), weights of the edges
   # start_end_states: (2, batch), (start,end) state idx in automaton.
