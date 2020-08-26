@@ -4714,6 +4714,7 @@ class CombineLayer(LayerBase):
     vs = {}  # type: typing.Dict[str,object]
     if not callable(eval_str):
       vs.update(vars(tf_util))
+      vs.update(vars(tf_compat.v1))
       vs.update({"tf": tf})
     vs.update({"source": source, "self": self})
     vs.update(eval_locals or {})
