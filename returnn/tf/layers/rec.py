@@ -3786,10 +3786,12 @@ class RnnCellLayer(_ConcatInputLayer):
       assert key is None, "state %r is a tensor, thus key %r must be None" % (state, key)
       x = state
     assert isinstance(x, tf.Tensor)
-    if shape is None:
-      x.set_shape(tf.TensorShape([None, None]))  # Assume (batch,dim).
-    else:
-      x.set_shape(tf.TensorShape([None] * len(shape)))
+    # wrong assumption:
+    # for NativeLstm2SaveStates we have (time,batch,dim) for the last hidden state
+    # if shape is None:
+    #   x.set_shape(tf.TensorShape([None, None]))  # Assume (batch,dim).
+    # else:
+    #   x.set_shape(tf.TensorShape([None] * len(shape)))
     return x
 
   def get_last_hidden_state(self, key):

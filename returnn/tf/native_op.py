@@ -885,6 +885,81 @@ class NativeLstm2(RecSeqCellOp):
     return out, rnn_cell.LSTMStateTuple(h=final_output, c=final_cell_state)
 
 
+class NativeLstm2StoreStates(RecSeqCellOp):
+  """
+  Native LSTM 2, but stores the hidden states/outputs for all timesteps.
+  See :class:`NativeOp.NativeLstm2`.
+  """
+  does_input_projection = False
+  does_direction_handling = True
+
+  def __init__(self, rec_weight_dropout=0.0, **kwargs):
+    """
+    :param float rec_weight_dropout: weight dropout in the recurrent matrix, https://openreview.net/pdf?id=SyyGPP0TZ
+    """
+    super(NativeLstm2StoreStates, self).__init__(**kwargs)
+    self.n_input_dim_parts = [self.n_hidden] * 4
+    self.n_input_dim = self.n_hidden * 4
+    self.rec_weight_dropout = rec_weight_dropout
+    self.op = make_op(native_op.NativeLstm2)
+
+  @property
+  def state_size(self):
+    """
+    :rtype: rnn_cell.LSTMStateTuple
+    """
+    return rnn_cell.LSTMStateTuple(c=self.n_hidden, h=self.n_hidden)
+
+  def __call__(self, inputs, index, initial_state=None, recurrent_weights_initializer=None):
+    """
+    :param tf.Tensor inputs: shape (time,batch,n_hidden)
+    :param tf.Tensor index: shape (time,batch)
+    :param tf.Tensor|None initial_state: shape (batch,n_hidden)
+    :param ()->tf.Tensor recurrent_weights_initializer:
+    :returns: shape (time,batch,n_hidden), shape (n_time, batch,n_hidden)
+    :rtype: (tf.Tensor, tf.Tensor)
+    """
+    weights = tf_compat.v1.get_variable(
+      name="W_re", shape=(self.n_hidden, self.n_hidden * 4), initializer=recurrent_weights_initializer)
+    tf_util.set_param_axes_split_info(weights, [[self.n_hidden], [self.n_hidden] * 4])
+    if self.rec_weight_dropout:
+      from returnn.tf.util.basic import dropout
+      weights = dropout(
+        weights, keep_prob=1.0 - self.rec_weight_dropout, cond_on_train=True,
+        seed=tf_util.get_random_seed())
+    inputs.set_shape(tf.TensorShape([None, None, self.n_hidden * 4]))
+    weights.set_shape(tf.TensorShape([self.n_hidden, self.n_hidden * 4]))
+    index.set_shape(tf.TensorShape([None, None]))
+    from returnn.tf.util.basic import to_float32
+    index = to_float32(index)
+    n_batch = tf.shape(inputs)[1]
+    if initial_state is None:
+      c0 = tf.zeros((n_batch, self.n_hidden), dtype=tf.float32, name="initial_c")
+      y0 = tf.zeros((n_batch, self.n_hidden), dtype=tf.float32, name="initial_h")
+    elif isinstance(initial_state, rnn_cell.LSTMStateTuple):
+      c0 = initial_state.c
+      y0 = initial_state.h
+    else:
+      assert isinstance(initial_state, tf.Tensor)
+      c0 = initial_state
+      y0 = tf.zeros((n_batch, self.n_hidden), dtype=tf.float32, name="initial_h")
+    start = tf.constant(0, name="start")
+    step = tf.constant(self.step or 1, name="step")
+    #     :param Y: output. 3d (time,batch,dim)
+    #     :param C: cell states. 3d (time,batch,dim). gradient ignored!
+    #     :param H: cell-in + gates. 3d (time,batch,dim*4). gradient ignored!
+    #     :param d: final cell state. 2d (batch,dim)
+    out, cell_states, hidden_states, final_cell_state = self.op(inputs, weights, y0, c0, index, start, step)  # noqa
+    if out.get_shape().as_list()[0] is None or out.get_shape().as_list()[0] > 0:
+      final_output = out[-1]
+    else:
+      final_output = y0
+    # return out, rnn_cell.LSTMStateTuple(h=final_output, c=final_cell_state)
+    all_h = out  # [T,B,D]  TODO: or `hidden_states`
+    all_c = cell_states  # [T,B,D]
+    return out, rnn_cell.LSTMStateTuple(h=all_h, c=all_c)
+
+
 class TwoDNativeLstmCell(RecSeqCellOp):
   """
   Native 2D LSTM.
