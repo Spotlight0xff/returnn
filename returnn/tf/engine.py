@@ -2399,6 +2399,7 @@ class Engine(EngineBase):
       else:
         raise Exception("invalid output_file_format %r" % output_file_format)
       output_file.close()
+      return out_cache
 
   def search_single(self, dataset, seq_idx, output_layer_name=None):
     """

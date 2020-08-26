@@ -14,7 +14,7 @@ from returnn.theano.ops.numpy_align import NumpyAlignOp
 from returnn.native_op import FastBaumWelchOp, SegmentFastBaumWelchOp, MultiEndFastBaumWelchOp
 from returnn.theano.layers.base import Layer
 from .hidden import CAlignmentLayer
-from returnn.sprint.error_signals import sprint_loss_and_error_signal, SprintAlignmentAutomataOp
+# from returnn.sprint.error_signals import sprint_loss_and_error_signal, SprintAlignmentAutomataOp
 from returnn.theano.util import time_batch_make_flat, grad_discard_out_of_bound, DumpOp
 from returnn.util.basic import as_str
 from returnn.log import log

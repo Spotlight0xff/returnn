@@ -15,7 +15,7 @@ class NumpyDumpDataset(Dataset):
   """
 
   file_format_data = "%i.data"
-  file_format_targets = "%i.targets"
+  file_format_targets = "%i.targets.alignment"
 
   def __init__(self, prefix, postfix=".txt.gz",
                start_seq=0, end_seq=None,
