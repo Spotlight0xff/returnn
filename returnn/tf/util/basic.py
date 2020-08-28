@@ -919,7 +919,7 @@ class _DeviceAttributes:
 _list_local_devices = None
 
 
-def get_tf_list_local_devices(tf_session_opts=None):
+def get_tf_list_local_devices(tf_session_opts=None, file=None):
   """
   This uses tensorflow.device_lib.list_local_devices().
   Note that a call to this will trigger the internal TF thread pool inits,
@@ -929,13 +929,14 @@ def get_tf_list_local_devices(tf_session_opts=None):
   You can get the list available in a given TF session by :func:`tf.compat.v1.Session.list_devices`.
 
   :param dict[str]|None tf_session_opts: if given, will init a temp tf.compat.v1.Session with these opts
+  :param typing.TextIO|None file: log_stream stream for print statements, defaults to sys.stdout
   :rtype: list[tensorflow.core.framework.device_attributes_pb2.DeviceAttributes|_DeviceAttributes]
   """
   check_initial_tf_thread_pool_init(tf_session_opts=tf_session_opts)
   global _list_local_devices
   if _list_local_devices is not None:
     return _list_local_devices
-  print("Collecting TensorFlow device list...")
+  print("Collecting TensorFlow device list...", file=file)
   if tf_session_opts and tf_session_opts.get("gpu_options", {}):
     # On any gpu_options, e.g. gpu_options.per_process_gpu_memory_fraction:
     # The first usage of a device will use the provided options.
@@ -990,7 +991,7 @@ def print_available_devices(tf_session_opts=None, file=None):
   so you should call :func:`setup_tf_thread_pools` first.
 
   :param dict[str]|None tf_session_opts: if given, will init a temp Session with these opts
-  :param io.FileIO file:
+  :param typing.TextIO|None file: file stream for print statements, defaults to sys.stdout
   """
   if file is None:
     file = sys.stdout
@@ -1003,7 +1004,7 @@ def print_available_devices(tf_session_opts=None, file=None):
   if tf_session_opts and tf_session_opts.get("gpu_options", {}).get("visible_device_list", None):
     print("TF session gpu_options.visible_device_list is set to %r." % (
       tf_session_opts["gpu_options"]["visible_device_list"],), file=file)
-  devs = get_tf_list_local_devices(tf_session_opts=tf_session_opts)
+  devs = get_tf_list_local_devices(tf_session_opts=tf_session_opts, file=file)
   print("Local devices available to TensorFlow:", file=file)
   for i, dev in enumerate(devs):
     print("  %i/%i: %s" % (i + 1, len(devs), "\n       ".join(str(dev).splitlines())), file=file)
@@ -1340,6 +1341,41 @@ def load_txt_file_initializer(filename, dtype=tf.float32):
   return LoadTxtFileInitializer()
 
 
+class GammatoneFilterbankInitializer(init_ops.Initializer):
+  """
+  Initializer for a gammatone filterbank, e.g., to initialize weights of a convolutional layer.
+  """
+
+  def __init__(self, **kwargs):
+    """
+    :param kwargs: kwargs for GammatoneFilterbank
+    """
+    from returnn.util.sig_proc import GammatoneFilterbank
+    self.gammatone_filterbank = GammatoneFilterbank(**kwargs)
+
+  def __call__(self, shape, dtype=tf.float32, partition_info=None):
+    """
+    :param tuple[int] shape:
+    :param tf.DType dtype:
+    :param partition_info:
+    :rtype: tf.Tensor
+    """
+    import numpy
+    fbank = self.gammatone_filterbank.get_gammatone_filterbank()
+    # Check whether shape and specified parameters for gammatone filterbank match. Currently, this is just implemented
+    # for the case that the expected shape is (sample_rate * length, num_channels) with possibly additional 1-dim axes
+    # in between.
+    gammatone_shape = (
+      int(self.gammatone_filterbank.sample_rate * self.gammatone_filterbank.length),
+      self.gammatone_filterbank.num_channels
+    )
+    assert shape[0] == gammatone_shape[0], "Expected shape does not match given gammatone filterbank paramerers"
+    assert shape[-1] == gammatone_shape[-1], "Expected shape does not match given gammatone filterbank paramerers"
+    fbank = numpy.reshape(fbank, shape)
+    fbank = fbank.astype(dtype.as_numpy_dtype)
+    return tf.convert_to_tensor(fbank, dtype=dtype)
+
+
 def get_initializer(s, seed=None, eval_local_ns=None, dtype=tf.float32):
   """
   :param str|dict[str]|float|numpy.ndarray s: e.g. "glorot_uniform" or "truncated_normal" or "orthogonal",
@@ -1431,6 +1467,8 @@ def dropout(x, keep_prob, noise_shape=None, seed=None, name=None, cond_on_train=
   """
   Computes dropout.
   Like :func:`tf.nn.dropout` but avoid :func:`tf.div` if possible.
+  If `noise_shape` is statically known, and `x` is inside a recurrent loop,
+  we will reuse the same mask for all frames.
 
   :param tf.Tensor x:
   :param float|tf.Tensor keep_prob:
@@ -1455,16 +1493,27 @@ def dropout(x, keep_prob, noise_shape=None, seed=None, name=None, cond_on_train=
       return x
     inv_keep_prob = 1.0 / keep_prob
 
-    noise_shape = noise_shape if noise_shape is not None else tf.shape(x)
     if isinstance(noise_shape, (list, tuple)):
-      noise_shape = [d if isinstance(d, int) else tf.shape(x)[i] for (i, d) in enumerate(noise_shape)]
-    # uniform [keep_prob, 1.0 + keep_prob)
-    random_tensor = keep_prob
-    random_tensor += tf_compat.v1.random_uniform(noise_shape, seed=seed, dtype=x.dtype)
-    # 0. if [keep_prob, 1.0) and 1. if [1.0, 1.0 + keep_prob)
-    binary_tensor = tf.floor(random_tensor)
-    if apply_correction_factor:
-      binary_tensor *= inv_keep_prob
+      assert len(noise_shape) == x.shape.ndims
+      noise_shape = [d if isinstance(d, int) else get_shape_dim(x, i) for (i, d) in enumerate(noise_shape)]
+    elif noise_shape is None:
+      noise_shape = get_shape(x)
+    else:
+      assert isinstance(noise_shape, tf.Tensor) and noise_shape.shape.as_list() == [x.shape.ndims]
+      from tensorflow.python.framework import tensor_util
+      noise_shape_v = tensor_util.constant_value(noise_shape)
+      if noise_shape_v is not None:
+        noise_shape = [int(noise_shape_v[i]) for i in range(x.shape.ndims)]
+    # If noise_shape is fully static, calculate it outside of any ctx (e.g. recurrent loop).
+    # This effectively means that the mask would get reused for multiple frames, if `x` is inside a recurrent loop.
+    with same_control_flow_ctx(noise_shape):
+      # uniform [keep_prob, 1.0 + keep_prob)
+      random_tensor = keep_prob
+      random_tensor += tf_compat.v1.random_uniform(noise_shape, seed=seed, dtype=x.dtype)
+      # 0. if [keep_prob, 1.0) and 1. if [1.0, 1.0 + keep_prob)
+      binary_tensor = tf.floor(random_tensor)
+      if apply_correction_factor:
+        binary_tensor *= inv_keep_prob
     ret = x * binary_tensor
     assert isinstance(ret, tf.Tensor)
     ret.set_shape(x.get_shape())
@@ -2975,7 +3024,7 @@ def _op_repr(x):
   extra = ""
   if x.type == "Const":
     from tensorflow.python.framework import tensor_util
-    extra += " value=%s" % (tensor_util.constant_value(x.outputs[0]),)
+    extra += " value=%s" % (tensor_util.MakeNdarray(x.get_attr("value")),)
   return "<tf.Operation %r type=%s%s>" % (x.name, x.type, extra)
 
 
@@ -4861,7 +4910,6 @@ def _get_control_flows(v, yield_none):
   """
   :param tf.Tensor|tf.Operation|int|float|None|list[tf.Tensor|tf.Operation|int|float] v:
   :param bool yield_none: the default context is None. specifies whether we should return that
-    (currently still skips non-tensors (int or so)).
   :return: yields control flow contexts
   :rtype: typing.Iterator[tensorflow.python.ops.control_flow_ops.ControlFlowContext|None]
   """
@@ -4873,6 +4921,7 @@ def _get_control_flows(v, yield_none):
         yield t
     return
   if isinstance(v, (int, float, numpy.integer, type(None))):
+    yield None
     return
   if isinstance(v, tf.Tensor):
     v = v.op
@@ -4919,6 +4968,8 @@ def same_control_flow_ctx(x):
     # Just stay in the current context.
     yield None
     return
+  if len(ctxs) > 1 and None in ctxs:
+    ctxs.remove(None)
   assert len(ctxs) == 1, "found multiple context: %r" % ctxs
   graph = tf_compat.v1.get_default_graph()
   ctx = list(ctxs)[0]
@@ -6335,6 +6386,25 @@ def compute_sampled_logits(weights,
     ], 1)
 
     return out_logits, out_targets
+
+
+def safe_deep_copy(obj):
+  """
+  :param T obj:
+  :return: deepcopy of obj, without copying TF types, Python modules, functions/lambdas
+  :rtype: T
+  """
+  import types
+  from returnn.util.basic import deepcopy
+  stop_types = [
+    # Python types.
+    types.FunctionType, types.LambdaType, types.BuiltinFunctionType, types.BuiltinMethodType,
+    types.ModuleType,
+    # Common TF types.
+    tf.Tensor, tf.Operation, tf.Variable, tf.Graph, tf_compat.v1.Session,
+    # Our own types, which should not be copied.
+    DimensionTag]
+  return deepcopy(obj, stop_types=stop_types)
 
 
 class FetchHelper:

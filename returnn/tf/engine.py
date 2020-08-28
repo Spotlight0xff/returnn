@@ -34,6 +34,8 @@ from returnn.log import log
 from returnn.pretrain import pretrain_from_config
 import returnn.tf.compat as tf_compat
 from returnn.tf.network import TFNetwork, ExternData, help_on_tf_exception
+from returnn.tf.util.data import Data
+from returnn.tf.layers.base import LayerBase
 from returnn.tf.updater import Updater
 from returnn.tf.data_pipeline import FeedDictDataProvider, DatasetDataProvider
 import returnn.tf.horovod as tf_horovod
@@ -65,7 +67,7 @@ class Runner(object):
     :param bool train: whether to do updates on the model
     :param bool|None train_flag: normally just as train. but e.g. maybe you want to have the train_flag but not train
     :param bool eval: whether to evaluate (i.e. calculate loss/error)
-    :param dict[str,tf.Tensor|TFUtil.Data|TFNetworkLayer.LayerBase|()->tf.Tensor)]|None extra_fetches:
+    :param dict[str,tf.Tensor|Data|LayerBase|(()->tf.Tensor)]|None extra_fetches:
       additional fetches per step.
       `extra_fetches_callback` will be called with these. In case of Data/LayerBase, it will return a list,
       where each item corresponds to the batch-seq.
@@ -155,8 +157,6 @@ class Runner(object):
         d.update(self.engine.updater.optim_meta_losses_dict)
 
     if self.extra_fetches is not None:
-      from returnn.tf.layers.basic import LayerBase
-      from returnn.tf.util.basic import Data
       for k, v in self.extra_fetches.items():
         if v is None:
           continue
@@ -236,7 +236,8 @@ class Runner(object):
     self.results = results
     self.score = {key: float(value) for (key, value) in results.items() if key.startswith("cost:")}
     if self.engine.config.bool("calculate_exp_loss", False):
-      self.score.update({key + ":exp": float(numpy.exp(value)) for (key, value) in results.items() if key.startswith("cost:")})
+      self.score.update({
+        key + ":exp": float(numpy.exp(value)) for (key, value) in results.items() if key.startswith("cost:")})
     self.error = {key: float(value) for (key, value) in results.items() if key.startswith("error:")}
     self.num_steps = num_steps
     self.finalized = True
@@ -361,8 +362,6 @@ class Runner(object):
     if self.extra_fetches is None:
       return
     d = {}
-    from returnn.tf.layers.base import LayerBase
-    from returnn.tf.util.data import Data
     for k, v in self.extra_fetches.items():
       if v is None:
         d[k] = None
@@ -1026,12 +1025,18 @@ class Engine(EngineBase):
     self.seq_drop = config.float('seq_drop', 0.0)
     self.seq_drop_freq = config.float('seq_drop_freq', 10)
     self.max_seq_length = config.typed_value('max_seq_length', None) or config.float('max_seq_length', 0)
+    self.min_seq_length = config.typed_value('min_seq_length', None) or config.float('min_seq_length', 0)
     self.inc_seq_length = config.float('inc_seq_length', 0)
     if not self.max_seq_length:
       self.max_seq_length = sys.maxsize  # type: typing.Union[int,float,typing.Dict[str,int]|NumbersDict]
     if isinstance(self.max_seq_length, dict):
       self.max_seq_length = NumbersDict(self.max_seq_length)
     assert isinstance(self.max_seq_length, (int, float, NumbersDict))
+    if not self.min_seq_length:
+      self.min_seq_length = 0
+    if isinstance(self.min_seq_length, dict):
+      self.min_seq_length = NumbersDict(self.min_seq_length)
+    assert isinstance(self.min_seq_length, (int, float, NumbersDict))
     self.max_pad_size = config.typed_value("max_pad_size", None)
     # And also initialize the network. That depends on some vars here such as pretrain.
     self.init_network_from_config(config)
@@ -1052,6 +1057,9 @@ class Engine(EngineBase):
       net_dict = self.custom_get_net_dict(epoch=epoch)
       assert isinstance(net_dict, dict), "%s should return dict but returned %s" % (
         self.custom_get_net_dict, type(net_dict))
+    elif self.pretrain:
+      # Use the net from pretrain. This might resolve things like WrapEpochValue.
+      net_dict = self.pretrain.get_final_network_json()
     else:
       from returnn.config import network_json_from_config
       net_dict = network_json_from_config(config)
@@ -1436,7 +1444,7 @@ class Engine(EngineBase):
       if self.epoch != self.final_epoch:
         print("Stopped after epoch %i and not %i as planned." % (self.epoch, self.final_epoch), file=log.v3)
 
-    print("Finished training in epoch %i." % self.epoch, file=log.v3)
+    print("Finished training in epoch %i." % self.epoch, file=log.v3)  # noqa
 
   def init_train_epoch(self):
     """
@@ -1518,6 +1526,7 @@ class Engine(EngineBase):
         batch_size=self.batch_size,
         max_seqs=self.max_seqs,
         max_seq_length=self.max_seq_length,
+        min_seq_length=self.min_seq_length,
         max_pad_size=self.max_pad_size,
         seq_drop=self.seq_drop,
         shuffle_batches=self.shuffle_batches,
@@ -2034,7 +2043,7 @@ class Engine(EngineBase):
   def _get_output_layer(self, output_layer_name=None):
     """
     :param str|None output_layer_name: e.g. "output". if not set, will read from config "forward_output_layer"
-    :rtype: TFNetworkLayer.LayerBase
+    :rtype: returnn.tf.layers.base.LayerBase
     """
     if not output_layer_name:
       output_layer_name = self.config.value("forward_output_layer", self.network.get_default_output_layer_name())
@@ -2197,7 +2206,6 @@ class Engine(EngineBase):
     :param str output_file:
     :param str output_file_format: "txt" or "py"
     """
-    from returnn.tf.layers.base import LayerBase
     print("Search with network on %r." % dataset, file=log.v1)
     if not self.use_search_flag or not self.network or self.use_dynamic_train_flag:
       self.use_search_flag = True

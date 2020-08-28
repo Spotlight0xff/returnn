@@ -283,7 +283,7 @@ class TFNetwork(object):
     :param bool|tf.Tensor train_flag: True if we want to use this model in training, False if in eval, or dynamic
     :param bool eval_flag: whether to calculate losses. if train_flag is not False, this will be set to True
     :param bool search_flag: whether we perform a beam-search. see usage
-    :param TFNetworkLayer.LayerBase|None parent_layer:
+    :param returnn.tf.layers.base.LayerBase|None parent_layer:
     :param TFNetwork|None parent_net:
     :param TFNetwork|None extra_parent_net: we are on the same level (not really a child),
       but an "extra" net of extra_parent_net
@@ -362,7 +362,7 @@ class TFNetwork(object):
     self._graph_reset_callbacks = []  # type: typing.List[typing.Callable]
     self._run_opts = {}  # type: typing.Dict[str]
     self._run_finished_callbacks = []  # type: typing.List[typing.Callable]
-    self._map_search_beam_to_search_choices = {}  # type: typing.Dict[tf_util.SearchBeam,"TFNetworkLayer.SearchChoices"]
+    self._map_search_beam_to_search_choices = {}  # type: typing.Dict[tf_util.SearchBeam,"returnn.tf.layers.base.SearchChoices"]  # nopep8
 
   def __repr__(self):
     s = "TFNetwork %r" % self.name
@@ -657,7 +657,7 @@ class TFNetwork(object):
       else:
         layer_desc = net_dict[name]
     if not layer_desc:
-      raise LayerNotFound("layer %r not found in %r" % (name, self))
+      raise LayerNotFound("layer %r not found in %r" % (name, self), layer_name=name, network=self, net_dict=net_dict)
     if not add_layer:
       add_layer = self.add_layer
     layer_desc = layer_desc.copy()
@@ -671,17 +671,20 @@ class TFNetwork(object):
       self._construction_stack.remove(name)
     return add_layer(name=name, layer_class=layer_class, **layer_desc)
 
-  def _create_layer_layer_desc(self, name, layer_desc):
+  def _create_layer_layer_desc(self, name, layer_desc, template=True):
     """
     This is called *after* :func:`LayerBase.transform_config_dict`
     and *before* :func:`LayerBase.get_out_data_from_opts`.
 
     :param str name: layer name
     :param dict[str] layer_desc: opts
+    :param bool template: for template inference, we do not need the full logic
     :rtype: dict[str]
     """
     from returnn.tf.layers.basic import SearchChoices
-    layer_desc = SearchChoices.translate_to_common_search_beam(layer_desc)
+    if not template:
+      # This might not even work correctly during template construction.
+      layer_desc = SearchChoices.translate_to_common_search_beam(layer_desc)
     layer_desc = layer_desc.copy()
     assert "name" not in layer_desc
     assert "network" not in layer_desc
@@ -706,7 +709,7 @@ class TFNetwork(object):
     from pprint import pprint
     from returnn.util.basic import help_on_type_error_wrong_args
     from returnn.tf.util.basic import py_print
-    layer_desc = self._create_layer_layer_desc(name=name, layer_desc=layer_desc)
+    layer_desc = self._create_layer_layer_desc(name=name, layer_desc=layer_desc, template=False)
     debug_print_layer_output_template = self.get_config().bool("debug_print_layer_output_template", False)
     debug_print_layer_output_shape = self.get_config().bool("debug_print_layer_output_shape", False)
     debug_add_check_numerics_on_output = self.get_config().bool(
@@ -811,7 +814,7 @@ class TFNetwork(object):
   def get_seq_tags(self, mark_data_key_as_used=True, beam=None):
     """
     :param bool mark_data_key_as_used: for extern_data
-    :param TFUtil.SearchBeam|None beam:
+    :param returnn.tf.util.data.SearchBeam|None beam:
     :return: tensor of shape (batch,) of dtype string, via extern_data
     :rtype: tf.Tensor
     """
@@ -1130,11 +1133,14 @@ class TFNetwork(object):
       prefix, layer_name = layer_name.split(":", 1)
       extra_net, _ = self._get_extra_net(prefix_name=prefix, auto_create=False)
       if not extra_net:
-        raise LayerNotFound("cannot get layer %r, no extra net for %r" % (layer_name, self))
+        raise LayerNotFound(
+          "cannot get layer %r, no extra net for %r" % (layer_name, self),
+          layer_name=layer_name, network=self)
       return extra_net.get_layer(layer_name)
     if layer_name.startswith("base:"):
       if not self.parent_net:
-        raise LayerNotFound("cannot get layer %r, no parent net for %r" % (layer_name, self))
+        raise LayerNotFound(
+          "cannot get layer %r, no parent net for %r" % (layer_name, self), layer_name=layer_name, network=self)
       return self.parent_net.get_layer(layer_name[len("base:"):])
     if layer_name == "data" or layer_name.startswith("data:"):
       # Not created yet. Try to create it now.
@@ -1148,7 +1154,7 @@ class TFNetwork(object):
     if self.extra_parent_net:
       return self.extra_parent_net.get_layer(layer_name)
     if layer_name not in self.layers:
-      raise LayerNotFound("layer %r not found in %r" % (layer_name, self))
+      raise LayerNotFound("layer %r not found in %r" % (layer_name, self), layer_name=layer_name, network=self)
     return self.layers[layer_name]
 
   def _get_all_layers(self):
@@ -1439,10 +1445,18 @@ class TFNetwork(object):
     :param str filename:
     :param tf.compat.v1.Session session:
     """
-    if any([layer.custom_param_importer for layer in self.layers.values()]):
+    saveable_params = self.get_saveable_params_list()
+    must_use_custom_checkpoint_loader = False
+    if any([have_custom_post_init(param) for param in saveable_params]):
+      # We must keep the behavior consistent.
+      # CustomCheckpointLoader will not load any params with a custom init.
+      must_use_custom_checkpoint_loader = True
+    if any([layer.custom_param_importer for layer in self._get_all_layers()]):
       # Need to use CustomCheckpointLoader because only that handles custom_param_importer correctly.
+      must_use_custom_checkpoint_loader = True
+    if must_use_custom_checkpoint_loader:
       loader = CustomCheckpointLoader(
-        filename=filename, saveable_params=self.get_saveable_params_list(), network=self)
+        filename=filename, saveable_params=saveable_params, network=self)
       loader.load_now(session=session)
       return
     if not self.saver:
@@ -1458,7 +1472,7 @@ class TFNetwork(object):
       print("load_params_from_file: some variables not found", file=log.v2)
       try:
         loader = CustomCheckpointLoader(
-          filename=filename, saveable_params=self.get_saveable_params_list(), network=self)
+          filename=filename, saveable_params=saveable_params, network=self)
         if not loader.missing_var_names:
           print("Strange, nothing missing? Pre-loaded missing variables from other checkpoints?", file=log.v2)
         loader.load_now(session=session)
@@ -1916,7 +1930,7 @@ class TFNetwork(object):
 
     Note: These callbacks will only be called if there was not any error.
 
-    :param function cb:
+    :param function|()->None cb:
     """
     self.get_root_network()._graph_reset_callbacks.append(cb)
 
@@ -1958,7 +1972,7 @@ class TFNetwork(object):
 
   def register_run_finished_callback(self, cb):
     """
-    :param function cb:
+    :param function|()->None cb:
     """
     self.get_root_network()._run_finished_callbacks.append(cb)
 
@@ -2016,17 +2030,19 @@ class TFNetwork(object):
   def get_search_choices_from_beam(self, beam):
     """
     Currently we have somewhat redundant information in
-    :class:`TFUtil.SearchBeam` (which is totally independent from other things in RETURNN (which is good))
+    :class:`returnn.tf.util.data.SearchBeam` (which is totally independent from other things in RETURNN (which is good))
     and
-    :class:`TFNetworkLayer.SearchChoices` (which is more dependent on the RETURNN layers, and has some more info).
+    :class:`returnn.tf.layers.base.SearchChoices` (which is more dependent on the RETURNN layers,
+      and has some more info).
     The :class:`Data` (which is also independent from other things in RETURNN (which is also good))
-    only knows about :class:`TFUtil.SearchBeam` but not about :class:`TFNetworkLayer.SearchChoices`.
+    only knows about :class:`returnn.tf.util.data.SearchBeam`
+    but not about :class:`returnn.tf.layers.base.SearchChoices`.
     Thus there are situations where we only have a ref to the former, but like to get a ref to the latter.
 
     Note that this might (hopefully) get cleaned up at some point...
 
-    :param TFUtil.SearchBeam beam:
-    :rtype: TFNetworkLayer.SearchChoices|None
+    :param returnn.tf.util.data.SearchBeam beam:
+    :rtype: returnn.tf.layers.base.SearchChoices|None
     """
     root_net = self.get_root_network()
     if root_net is not self:
@@ -2036,8 +2052,8 @@ class TFNetwork(object):
 
   def register_search_choices_for_beam(self, beam, search_choices):
     """
-    :param TFUtil.SearchBeam beam:
-    :param TFNetworkLayer.SearchChoices search_choices:
+    :param returnn.tf.util.data.SearchBeam beam:
+    :param returnn.tf.layers.base.SearchChoices search_choices:
     """
     root_net = self.get_root_network()
     if root_net is not self:
@@ -2085,7 +2101,7 @@ class LossHolder:
       We can always point to a layer where this comes from (either in the subnet, or the parent layer).
     :param Data layer_output: template describing the layer output
     :param TFNetwork network: for which network to create this LossHolder. might be different from layer.network
-    :param TFNetworkLayer.Loss loss:
+    :param returnn.tf.layers.base.Loss loss:
     :param ((tf.Tensor)->tf.Tensor)|None reduce_func: if given, will overwrite the reduce func for the loss.
       By default, every loss_value and error_value is a scalar
       (sum or average over the batches, and over the frames for frame-wise losses).
@@ -2363,7 +2379,24 @@ class LossHolder:
       norm_factor=self._norm_factor, only_on_eval=self._only_on_eval)
 
 
-class NetworkConstructionDependencyLoopException(Exception):
+class NetworkLayerException(Exception):
+  """
+  Some exception by the network, e.g. during construction.
+  """
+  def __init__(self, message, layer_name, network, net_dict=None):
+    """
+    :param str message:
+    :param str layer_name:
+    :param TFNetwork network:
+    :param dict[str]|None net_dict:
+    """
+    super(NetworkLayerException, self).__init__(message)
+    self.layer_name = layer_name
+    self.network = network
+    self.net_dict = net_dict or network.layers_desc
+
+
+class NetworkConstructionDependencyLoopException(NetworkLayerException):
   """
   This is raised when there is a dependency loop in the network construction.
   """
@@ -2378,32 +2411,8 @@ class NetworkConstructionDependencyLoopException(Exception):
     msg += "\nConstruction stack (most recent first):"
     for layer_name_ in reversed(constructing_layers):
       msg += "\n  %s" % layer_name_
-    super(NetworkConstructionDependencyLoopException, self).__init__(msg)
-    self.network = network
-    self.layer_name = layer_name
-    self.net_dict = net_dict
-
-
-class CannotHandleUndefinedSourcesException(Exception):
-  """
-  Raised when some layer gets None (undefined) source(s) (because e.g. in RecLayer template construction),
-  and cannot handle it (e.g. cannot infer the out_type in that case).
-  """
-  def __init__(self, layer_name, layer_desc, extended_info_str=None):
-    """
-    :param str layer_name:
-    :param dict[str] layer_desc:
-    :param str|None extended_info_str:
-    """
-    from pprint import pformat
-    info_strs = [
-      "%r: cannot handle undefined sources without defined out_type." % layer_name,
-      pformat(layer_desc)]
-    if extended_info_str:
-      info_strs.append(extended_info_str)
-    super(CannotHandleUndefinedSourcesException, self).__init__("\n".join(info_strs))
-    self.layer_name = layer_name
-    self.layer_desc = layer_desc
+    super(NetworkConstructionDependencyLoopException, self).__init__(
+      msg, network=network, layer_name=layer_name, net_dict=net_dict)
 
 
 class _DelayedConstructionException(Exception):
@@ -2433,7 +2442,7 @@ class _DelayedConstructionException(Exception):
     return self.network.construct_layer(name=self.layer_name, **self.other_kwargs)
 
 
-class LayerNotFound(Exception):
+class LayerNotFound(NetworkLayerException):
   """
   Via :func:`TFNetwork.get_layer`.
   """
@@ -2688,8 +2697,7 @@ class CustomCheckpointLoader:
         print("%s: Ignoring variable %s" % (self, param), file=log.v3)
         continue
       count += 1
-      custom_post_init = getattr(param, "custom_post_init", None)
-      if custom_post_init:
+      if have_custom_post_init(param):
         print("%s: Not loading pre-initialized variable %s" % (self, param), file=log.v3)
         continue
       self.saveable_params.append(param)
@@ -2810,7 +2818,7 @@ class CustomCheckpointLoader:
     def __init__(self, value=None, custom_param_importer=None):
       """
       :param numpy.ndarray|None value:
-      :param CustomCheckpointLoader.CustomParamImporter custom_param_importer:
+      :param CustomCheckpointLoader.CustomParamImporter|None custom_param_importer:
       """
       assert value is not None or custom_param_importer
       self.value = value
@@ -3170,11 +3178,25 @@ class CustomCheckpointLoader:
 def set_custom_post_init(var, func):
   """
   It registers the provided `func` such that it gets called for this variable
-  in TFNetwork.initialize_params().
+  in :func:`TFNetwork.initialize_params`.
 
   :param tf.Variable var:
   :param (tf.compat.v1.Session)->None func:
   """
   # This custom attribute is a big ugly but simple.
   # It's read in TFNetwork.initialize_params().
+  assert callable(func)
   var.custom_post_init = func
+
+
+def have_custom_post_init(var):
+  """
+  :param tf.Variable var:
+  :return: whether :func:`set_custom_post_init` was called on this var, i.e. we have custom init
+  :rtype: bool
+  """
+  custom_post_init = getattr(var, "custom_post_init", None)
+  if custom_post_init:
+    assert callable(custom_post_init)
+    return True
+  return False

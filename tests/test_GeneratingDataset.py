@@ -1,12 +1,8 @@
 # -*- coding: utf8 -*-
 
 from __future__ import print_function
-import os
-import sys
 
-my_dir = os.path.dirname(os.path.realpath(__file__))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import _setup_test_env  # noqa
 import unittest
 from nose.tools import assert_equal, assert_is_instance, assert_in, assert_not_in, assert_true, assert_false
 from returnn.datasets.generating import *
@@ -16,10 +12,10 @@ import os
 import unittest
 
 from returnn.util import better_exchook
-better_exchook.replace_traceback_format_tb()
 from returnn.log import log
-log.initialize(verbosity=[5])
 
+
+my_dir = os.path.dirname(os.path.realpath(__file__))
 
 
 def test_init():
@@ -121,10 +117,10 @@ def test_BytePairEncoding_unicode():
   assert_equal(bpe.num_labels, 189)
   assert_equal(bpe.labels[5], "z")
   assert_equal(bpe.vocab["z"], 5)
-  assert_equal(bpe._bpe_codes[("n", "d</w>")], 1)
+  assert_equal(bpe.bpe._bpe_codes[("n", "d</w>")], 1)
   assert_equal(bpe.labels[6], u"å")
   assert_equal(bpe.vocab[u"å"], 6)
-  assert_equal(bpe._bpe_codes[(u"à", u"nd</w>")], 2)
+  assert_equal(bpe.bpe._bpe_codes[(u"à", u"nd</w>")], 2)
 
   def get_bpe_seq(text):
     """

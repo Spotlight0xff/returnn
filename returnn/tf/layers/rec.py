@@ -14,7 +14,7 @@ except ImportError:
   from tensorflow.python.ops import rnn_cell
 from returnn.tf.network import LayerNotFound
 from .basic import LayerBase, _ConcatInputLayer, SearchChoices, get_concat_sources_data_template, Loss
-from returnn.tf.util.basic import Data, SearchBeam, reuse_name_scope, get_random_seed, select_src_beams, DimensionTag
+from returnn.tf.util.basic import Data, SearchBeam, reuse_name_scope, get_random_seed, select_src_beams
 from returnn.util.basic import NotSpecified
 from returnn.log import log
 
@@ -289,7 +289,7 @@ class RecLayer(_ConcatInputLayer):
     This method transforms the templates in the config dictionary into references
     of the layer instances (and creates them in the process).
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     if isinstance(d.get("unit"), dict):
@@ -307,6 +307,10 @@ class RecLayer(_ConcatInputLayer):
         # Only used to resolve deps to base network.
         if name.startswith("base:"):
           return get_layer(name[len("base:"):])  # calls get_layer of parent network
+        from returnn.tf.layers.basic import InternalLayer
+        return InternalLayer(
+          name=name, network=subnet,
+          output=Data(name="dummy:RecLayer.transform_config_dict(%s)" % name, dim=1))
       from returnn.tf.network import TFNetwork, ExternData
       subnet = TFNetwork(parent_net=network, extern_data=network.extern_data)  # dummy subnet
       for sub in d["unit"].values():  # iterate over the layers of the subnet
@@ -350,7 +354,7 @@ class RecLayer(_ConcatInputLayer):
   @classmethod
   def get_out_data_from_opts(cls, network, unit, sources=(), initial_state=None, **kwargs):
     """
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param str|dict[str] unit:
     :param list[LayerBase] sources:
     :param str|LayerBase|list[str|LayerBase] initial_state:
@@ -358,10 +362,7 @@ class RecLayer(_ConcatInputLayer):
     """
     from tensorflow.python.util import nest
     source_data = get_concat_sources_data_template(sources) if sources else None
-    if (
-          not source_data.have_time_axis()
-          if (source_data and not source_data.undefined)
-          else network.is_inside_rec_layer()):
+    if source_data and not source_data.have_time_axis():
       # We expect to be inside another RecLayer, and should do a single step (like RnnCellLayer).
       out_time_dim_axis = None
       out_batch_dim_axis = 0
@@ -487,7 +488,7 @@ class RecLayer(_ConcatInputLayer):
     """
     :param str name: cell name, minus the "Cell" at the end
     :param bool cell_only: i.e. for single-step execution
-    :rtype: () -> rnn_cell.RNNCell|TFNativeOp.RecSeqCellOp
+    :rtype: type[rnn_cell.RNNCell]|type[returnn.tf.native_op.RecSeqCellOp]
     """
     if not cls._rnn_cells_dict:
       cls._create_rnn_cells_dict()
@@ -541,13 +542,13 @@ class RecLayer(_ConcatInputLayer):
   def get_losses(cls, name, network, output, loss=None, reduce_func=None, layer=None, **kwargs):
     """
     :param str name: layer name
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param Loss|None loss: argument just as for __init__
     :param Data output: the output (template) for the layer
     :param ((tf.Tensor)->tf.Tensor)|None reduce_func:
     :param LayerBase|None layer:
     :param kwargs: other layer kwargs
-    :rtype: list[TFNetwork.LossHolder]
+    :rtype: list[returnn.tf.network.LossHolder]
     """
     from returnn.tf.network import LossHolder
     losses = super(RecLayer, cls).get_losses(
@@ -945,11 +946,11 @@ class _SubnetworkRecCell(object):
     """
     :param dict[str,dict[str]] net_dict: dict for the subnetwork, layer name -> layer dict
     :param RecLayer parent_rec_layer:
-    :param TFNetwork.TFNetwork parent_net:
+    :param returnn.tf.network.TFNetwork parent_net:
     :param Data|None source_data: usually concatenated input from the rec-layer
     :param str|None rec_layer_name:
     """
-    from returnn.util.basic import deepcopy
+    from returnn.tf.util.basic import safe_deep_copy
     if parent_net is None and parent_rec_layer:
       parent_net = parent_rec_layer.network
     if source_data is None and parent_rec_layer:
@@ -964,7 +965,7 @@ class _SubnetworkRecCell(object):
       parent_rec_layer.cell = self
     self.parent_rec_layer = parent_rec_layer
     self.parent_net = parent_net
-    self.net_dict = deepcopy(net_dict, stop_types=[tf.Tensor, tf.Operation, DimensionTag])
+    self.net_dict = safe_deep_copy(net_dict)
     from returnn.tf.network import TFNetwork, ExternData, LossHolder
     self.net = TFNetwork(
       name="%s/%s:rec-subnet" % (parent_net.name, rec_layer_name),
@@ -975,6 +976,7 @@ class _SubnetworkRecCell(object):
       is_inside_rec_layer=True,
       absolute_name_prefix="%s%s/" % (parent_net.get_absolute_name_prefix(), rec_layer_name),
       parent_net=parent_net)
+    self.net.layers_desc.update(self.net_dict)
     if source_data:
       self.net.extern_data.data["source"] = (
         source_data.copy_template_excluding_time_dim())
@@ -1015,11 +1017,10 @@ class _SubnetworkRecCell(object):
     from pprint import pformat
     from collections import OrderedDict
     from returnn.util.basic import StringIO
-    from returnn.tf.network import CannotHandleUndefinedSourcesException, NetworkConstructionDependencyLoopException
+    from returnn.tf.network import NetworkConstructionDependencyLoopException
     # The stack trace is not so interesting for these exceptions.
     skip_stack_trace_exception_types = (
-      CannotHandleUndefinedSourcesException,
-      NetworkConstructionDependencyLoopException)
+      NetworkConstructionDependencyLoopException, LayerNotFound)
 
     class ConstructCtx:
       """
@@ -1030,26 +1031,51 @@ class _SubnetworkRecCell(object):
       partially_finished = []  # type: typing.List[_TemplateLayer]
       collected_exceptions = OrderedDict()  # type: OrderedDict[object,str]  # exc_key -> formatted exception/stack str
 
+      # noinspection PyShadowingNames
+      @classmethod
+      def collect_exception(cls, layer_name):
+        """
+        Collect most recent exception.
+        Pretty generic exception handling but anything could happen.
+        We don't do any output by default, as this could be very spammy,
+        but we collect the traceback, in case we get some other error later.
+        Then go on with the next get_layer.
+
+        :param str layer_name:
+        """
+        exc_type, value, tb = sys.exc_info()
+        exc_last_frame = list(better_exchook.iter_traceback(tb))[-1]
+        exc_key = (exc_last_frame.f_code.co_filename, exc_last_frame.f_lineno, exc_last_frame.f_code.co_name)
+        if exc_key not in cls.collected_exceptions:
+          if isinstance(value, skip_stack_trace_exception_types):
+            color = better_exchook.Color()
+            cls.collected_exceptions[exc_key] = "%s\n%s: %s\n" % (
+              color("EXCEPTION while constructing layer %r" % layer_name, color.fg_colors[1], bold=True),
+              color(exc_type.__name__, color.fg_colors[1]),
+              str(value))
+          else:
+            out = StringIO()
+            better_exchook.better_exchook(exc_type, value, tb, file=out)
+            cls.collected_exceptions[exc_key] = out.getvalue()
+
     class GetLayer:
       """
       Helper class to provide the ``get_layer`` function with specific properties.
       """
       # noinspection PyMethodParameters
       def __init__(lself,
-                   safe=False, allow_construct_in_call_nrs=None, allow_uninitialized_template=False,
+                   allow_uninitialized_template=False,
                    iterative_testing=True, reconstruct=False,
                    parent=None, parent_name=None):
         """
-        :param bool safe:
-        :param typing.Optional[typing.Set[int]] allow_construct_in_call_nrs:
-        :param bool allow_uninitialized_template:
-        :param bool iterative_testing:
-        :param bool reconstruct:
+        :param bool allow_uninitialized_template: whether an uninitialized template layer can be returned
+        :param bool iterative_testing: whether we should iterate through multiple get_layer variants
+        :param bool reconstruct: if layer exists and is initialized, do not return it but reconstruct it.
+          It could have been initialized with incorrect sources (marked as partially finished),
+          and thus the data output might be wrong.
         :param GetLayer|None parent:
         :param str|None parent_name:
         """
-        lself.safe = safe
-        lself.allow_construct_in_call_nrs = allow_construct_in_call_nrs
         lself.allow_uninitialized_template = allow_uninitialized_template
         if parent:
           assert isinstance(parent, GetLayer)
@@ -1057,7 +1083,6 @@ class _SubnetworkRecCell(object):
         lself.parent_name = parent_name
         lself.iterative_testing = iterative_testing
         lself.reconstruct = reconstruct
-        lself.count = 0
         lself.got_uninitialized_deps_count = 0
 
       # noinspection PyMethodParameters
@@ -1069,9 +1094,9 @@ class _SubnetworkRecCell(object):
           parent = parent.parent
         return (
           "<RecLayer construct template GetLayer>("
-          "safe %r, allow_construct_in_call_nrs %r, allow_uninitialized_template %r, "
-          "count %r, parents %r)") % (
-                 lself.safe, lself.allow_construct_in_call_nrs, lself.allow_uninitialized_template, lself.count,
+          "allow_uninitialized_template %r, "
+          "parents %r)") % (
+                 lself.allow_uninitialized_template,
                  "/".join(parent_names) or None)
 
       def _add_uninitialized_count(self):
@@ -1085,18 +1110,24 @@ class _SubnetworkRecCell(object):
         """
         Reset.
         """
-        self.count = 0
         self.got_uninitialized_deps_count = 0
 
       def construct(self, layer_name_):
         """
         Note: Different from just __call__: We reset first.
+        Also, we catch exceptions.
+        The layer should be in partially_finished in any case afterwards,
+        and we make sure later that we finally manage to construct them all.
 
         :param str layer_name_:
         """
         assert not self.parent
         self.reset()
-        self.__call__(layer_name_)
+        # noinspection PyBroadException
+        try:
+          self.__call__(layer_name_)
+        except Exception:
+          ConstructCtx.collect_exception(layer_name=layer_name_)
 
       # noinspection PyMethodParameters
       def add_templated_layer(lself, name, layer_class, **layer_desc):
@@ -1117,8 +1148,6 @@ class _SubnetworkRecCell(object):
         layer_desc["network"] = self.net
         layer_.kwargs = layer_desc  # set it now already for better debugging
         output = layer_class.get_out_data_from_opts(**layer_desc)
-        if output.undefined:
-          raise CannotHandleUndefinedSourcesException(layer_name=name, layer_desc=layer_desc)
         layer_.init(layer_class=layer_class, output=output, **layer_desc)
         if layer_ in ConstructCtx.partially_finished:
           if lself.got_uninitialized_deps_count == 0:  # in this case, we safely know that it is finished
@@ -1133,24 +1162,25 @@ class _SubnetworkRecCell(object):
         :param str name: layer name
         :param bool is_prev_time_frame: layer of prev frame ("prev:...")
         :return: layer, or None
-        :rtype: LayerBase|None
+        :rtype: LayerBase
         """
         _name = name
         if name.startswith("prev:"):
           name = name[len("prev:"):]
           self.prev_layers_needed.add(name)
           layer_ = lself.__call__(name, is_prev_time_frame=True)
-          if layer_ and name in self.layer_data_templates:
+          if name in self.layer_data_templates:
             assert isinstance(layer_, _TemplateLayer)
-            if layer_ not in ConstructCtx.partially_finished:  # it might not be final
-              layer_ = self.get_prev_template_layer(name)
-            elif layer_.is_initialized:
-              lself._add_uninitialized_count()
-              layer_ = layer_.copy_as_prev_time_frame()
+            if layer_.is_initialized:
+              if layer_ not in ConstructCtx.partially_finished:  # it might not be final
+                layer_ = self.get_prev_template_layer(name)
+              else:
+                lself._add_uninitialized_count()
+                layer_ = layer_.copy_as_prev_time_frame()
             else:
               lself._add_uninitialized_count()
-              return None
           return layer_
+        earlier_layer_output = None  # type: typing.Optional[Data]
         if name in self.layer_data_templates:
           layer_ = self.layer_data_templates[name]
           if ConstructCtx.layers:
@@ -1163,6 +1193,8 @@ class _SubnetworkRecCell(object):
             if layer_ in ConstructCtx.partially_finished:
               lself._add_uninitialized_count()
             return layer_
+          if layer_.is_initialized:
+            earlier_layer_output = layer_.output
         if name.startswith("base:"):
           assert not is_prev_time_frame
           layer_ = self._get_parent_layer(name[len("base:"):])
@@ -1197,17 +1229,10 @@ class _SubnetworkRecCell(object):
           # * layer_class.transform_config_dict (via construct_layer)
           # * layer_class.get_out_data_from_opts (via add_templated_layer)
           ConstructCtx.partially_finished.append(layer_)
-        lself.count += 1
-        if lself.allow_construct_in_call_nrs is not None:
-          if (lself.count - 1) not in lself.allow_construct_in_call_nrs:
-            lself._add_uninitialized_count()
-            return None
-        if lself.safe:
-          lself._add_uninitialized_count()
-          return None
+        default_get_layer = GetLayer(parent=lself, parent_name=_name)
+        default_success = False  # whether construction was successful with default_get_layer
         ConstructCtx.layers.append(layer_)
         try:
-          default_get_layer = GetLayer(parent=lself, parent_name=_name)
           # See how far we can get without recursive layer construction.
           # We only want to get the data template for now.
           # If that fails in some way,
@@ -1219,58 +1244,58 @@ class _SubnetworkRecCell(object):
           get_layer_candidates = []  # type: typing.List[GetLayer]
           # noinspection PyProtectedMember
           if lself.iterative_testing and name not in self.net._construction_stack.layers:
+            # We can get away with only two variants, because the reconstruction code below
+            # for partially finished layers will make sure that everything is correct.
             get_layer_candidates = [
               default_get_layer,
-              GetLayer(
-                allow_construct_in_call_nrs={0}, allow_uninitialized_template=False, parent=lself, parent_name=_name),
-              GetLayer(
-                allow_construct_in_call_nrs={1}, allow_uninitialized_template=False, parent=lself, parent_name=_name),
-              GetLayer(
-                safe=True, allow_uninitialized_template=False, parent=lself, parent_name=_name),
-              GetLayer(
-                allow_construct_in_call_nrs={0}, allow_uninitialized_template=True, parent=lself, parent_name=_name),
-              GetLayer(
-                safe=True, allow_uninitialized_template=True, parent=lself, parent_name=_name)]
+              GetLayer(allow_uninitialized_template=True, parent=lself, parent_name=_name),
+            ]
           for get_layer in get_layer_candidates:
             # noinspection PyBroadException
             try:
               self.net.construct_layer(
                 net_dict=self.net_dict, name=name,
                 get_layer=get_layer, add_layer=get_layer.add_templated_layer)
+              if get_layer is default_get_layer:
+                default_success = True
               break  # we did it, so get out of the loop
             except Exception:
-              # Pretty generic exception handling but anything could happen.
-              # We don't do any output by default, as this could be very spammy,
-              # but we collect the traceback, in case we get some other error later.
-              # Then go on with the next get_layer.
-              etype, value, tb = sys.exc_info()
-              exc_last_frame = list(better_exchook.iter_traceback(tb))[-1]
-              exc_key = (exc_last_frame.f_code.co_filename, exc_last_frame.f_lineno, exc_last_frame.f_code.co_name)
-              if exc_key not in ConstructCtx.collected_exceptions:
-                if isinstance(value, skip_stack_trace_exception_types):
-                  color = better_exchook.Color()
-                  ConstructCtx.collected_exceptions[exc_key] = "%s\n%s: %s\n" % (
-                    color("EXCEPTION", color.fg_colors[1], bold=True),
-                    color(etype.__name__, color.fg_colors[1]),
-                    str(value))
-                else:
-                  out = StringIO()
-                  better_exchook.better_exchook(etype, value, tb, file=out)
-                  ConstructCtx.collected_exceptions[exc_key] = out.getvalue()
-          # Now, do again, but with full recursive layer construction, to determine the dependencies.
-          ConstructCtx.most_recent = list(ConstructCtx.layers)
-          try:
-            default_get_layer.reset()
-            self.net.construct_layer(
-              net_dict=self.net_dict, name=name,
-              get_layer=default_get_layer, add_layer=default_get_layer.add_templated_layer)
-          except Exception:
-            raise
+              ConstructCtx.collect_exception(layer_name=name)
+          if not default_success:
+            # Now, do again, but with full recursive layer construction, to determine the dependencies.
+            ConstructCtx.most_recent = list(ConstructCtx.layers)
+            try:
+              default_get_layer.reset()
+              self.net.construct_layer(
+                net_dict=self.net_dict, name=name,
+                get_layer=default_get_layer, add_layer=default_get_layer.add_templated_layer)
+              default_success = True
+            except NetworkConstructionDependencyLoopException:
+              if layer_.is_initialized and lself.iterative_testing and not lself.reconstruct:
+                pass  # Return anyway. This will be resolved later.
+              else:
+                raise
+            except Exception:
+              raise
+
         finally:
           assert ConstructCtx.layers[-1] is layer_, "invalid stack %r, expected top layer %r" % (
             ConstructCtx.layers, layer_)
           ConstructCtx.layers.pop(-1)
+
+          if layer_.is_initialized:
+            if not layer_.output.size_placeholder and earlier_layer_output and earlier_layer_output.size_placeholder:
+              # E.g. during reconstruct, but based on other partially finished / incomplete sources.
+              # However, maybe we got useful dim tags / size placeholders from a previous (partial) construction.
+              # Copy if it matches.
+              # Do this even if there was an exception, but with new partial construction.
+              if earlier_layer_output.matches_var_dim_pattern(layer_.output):
+                layer_.output.size_placeholder = earlier_layer_output.size_placeholder.copy()
+
+        # It was constructed now.
         assert layer_.is_initialized
+        if not default_success:
+          lself._add_uninitialized_count()
         return layer_
 
     get_templated_layer = GetLayer()
@@ -1284,10 +1309,10 @@ class _SubnetworkRecCell(object):
       if "end" in self.net_dict:  # used to specify ending of a sequence
         get_templated_layer.construct("end")
 
-      for layer_name, layer in self.net_dict.items():
+      for layer_name, layer in sorted(self.net_dict.items()):
         if self.parent_net.eval_flag and layer.get("loss"):  # only collect losses if we need them
           get_templated_layer.construct(layer_name)
-      for layer_name, layer in self.net_dict.items():
+      for layer_name, layer in sorted(self.net_dict.items()):
         if layer.get("is_output_layer"):
           get_templated_layer.construct(layer_name)
 
@@ -1312,6 +1337,10 @@ class _SubnetworkRecCell(object):
           continue
         if len(ConstructCtx.partially_finished) >= old_len and not recent_changes:
           # No changes anymore. There is no real point in continuing. Just break.
+          assert all([layer.is_initialized for layer in ConstructCtx.partially_finished]), (
+            "Failed to initialize layers:\n" +
+            "".join(["  %s\n" % layer for layer in ConstructCtx.partially_finished if not layer.is_initialized]) +
+            "Check the further debug output for the partial construction and other exceptions.")
           break
         loop_limit -= 1
         assert loop_limit >= 0, (
@@ -1400,8 +1429,8 @@ class _SubnetworkRecCell(object):
         prev_output=prev_outputs.get(name, None),
         rec_vars_prev_outputs=prev_extra.get(name, None))
 
-    from returnn.util.basic import deepcopy
-    net_dict = deepcopy(self.net_dict, stop_types=[tf.Tensor, tf.Operation, DimensionTag])
+    from returnn.tf.util.basic import safe_deep_copy
+    net_dict = safe_deep_copy(self.net_dict)
     for name in net_dict.keys():
       if name in prev_layers:
         net_dict[name]["rec_previous_layer"] = prev_layers[name]
@@ -2899,6 +2928,7 @@ class _SubnetworkRecCell(object):
       search_flag=self.parent_net.search_flag,
       parent_layer=self.parent_rec_layer,
       parent_net=self.parent_net)
+    self.input_layers_net.layers_desc.update(self.net_dict)
     if self.parent_rec_layer.input_data:
       self.input_layers_net.extern_data.data["source"] = \
         self.parent_rec_layer.input_data
@@ -2986,6 +3016,7 @@ class _SubnetworkRecCell(object):
       search_flag=self.parent_net.search_flag,
       parent_layer=self.parent_rec_layer,
       parent_net=self.parent_net)
+    self.output_layers_net.layers_desc.update(self.net_dict)
     if self.parent_rec_layer.input_data:
       self.output_layers_net.extern_data.data["source"] = \
         self.parent_rec_layer.input_data
@@ -3014,7 +3045,12 @@ class _SubnetworkRecCell(object):
           layer_name=name, acc_ta=acc_ta, final_net_vars=final_net_vars, seq_len=seq_len,
           search_choices_cache=search_choices_cache)
         output = self.layer_data_templates[name].output.copy_template_adding_time_dim(time_dim_axis=0)
-        output.beam = search_choices.get_beam_info() if search_choices else None
+        if latest_layer_choice_name:
+          output.beam = self.net.layers[latest_layer_choice_name].search_choices.get_beam_info()
+        elif search_choices:
+          output.beam = search_choices.get_beam_info()
+        else:
+          output.beam = None
         max_len = tf.reduce_max(resolved_seq_len)
         # We should have accumulated it.
         output.placeholder = tensor_array_stack(acc_ta, stop=max_len)  # e.g. (time,batch,dim)
@@ -3144,16 +3180,16 @@ class _TemplateLayer(LayerBase):
 
   def __init__(self, network, name, construct_stack=None, cell=None):
     """
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param str name:
     :param LayerBase|None construct_stack: just for debugging repr
     :param _SubnetworkRecCell|None cell:
     """
     # Init with some dummy.
     super(_TemplateLayer, self).__init__(
-      out_type={"name": "dummy_initial_template_data", "undefined": True,
+      out_type={"name": "dummy_initial_template_data",
                 "batch_dim_axis": 0, "time_dim_axis": None,
-                "shape": (None,), "dim": None},  # (B,D) but D is unknown. no time-dim
+                "shape": ()},  # (B,). no time-dim
       name=name, network=network)
     self.output.size_placeholder = {}  # must be initialized
     self.layer_class = ":uninitialized-template"
@@ -3171,9 +3207,9 @@ class _TemplateLayer(LayerBase):
 
   def __repr__(self):
     if self.is_initialized:
-      return "<%s(%s)(%s) %r out_type=%s (construction stack %r)>" % (
+      return "<%s(%s)(%s) %s%r out_type=%s (construction stack %r)>" % (
         self.__class__.__name__, self.layer_class_type.__name__ if self.layer_class_type else None, self.layer_class,
-        self.get_absolute_name(), self.output.get_description(with_name=False),
+        self.network.get_absolute_name_prefix(), self.name, self.output.get_description(with_name=False),
         self.construct_stack.name if self.construct_stack else None)
     else:
       return "<%s %r uninitialized, construction stack %r>" % (
@@ -3441,7 +3477,7 @@ class _SubnetworkRecWrappedLoss(Loss):
   def init(self, output, output_with_activation=None, target=None, layer=None):
     """
     :param Data output:
-    :param None|TFNetworkLayer.OutputWithActivation output_with_activation:
+    :param None|returnn.tf.layers.basic.OutputWithActivation output_with_activation:
     :param Data|None target:
     :param LayerBase|None layer:
     """
@@ -3537,7 +3573,7 @@ class RecStepInfoLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     d.setdefault("from", [])  # source does not make sense
@@ -3546,7 +3582,7 @@ class RecStepInfoLayer(LayerBase):
   @classmethod
   def get_out_data_from_opts(cls, network, **kwargs):
     """
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: Data
     """
     # Check for the normal case first. If we don't have a parent rec layer, also fallback to this (e.g. debugging).
@@ -3673,7 +3709,6 @@ class RnnCellLayer(_ConcatInputLayer):
     :param list[LayerBase] sources:
     :rtype: Data
     """
-    # In case some input is undefined, just assume we are inside the loop.
     beam = None
     for dep in sources:
       if dep:
@@ -3681,7 +3716,7 @@ class RnnCellLayer(_ConcatInputLayer):
     shape = (n_out,)  # type: typing.Tuple[typing.Union[int,None],...]
     batch_dim_axis = 0
     time_dim_axis = None
-    if sources and sources[0] and sources[0].output.time_dim_axis is not None:
+    if sources and sources[0].output.time_dim_axis is not None:
       shape = (None,) + shape
       batch_dim_axis = 1
       time_dim_axis = 0
@@ -3970,7 +4005,7 @@ class RnnCellLayer(_ConcatInputLayer):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     super(RnnCellLayer, cls).transform_config_dict(d, network=network, get_layer=get_layer)
@@ -3982,7 +4017,7 @@ class RnnCellLayer(_ConcatInputLayer):
   def transform_initial_state(initial_state, network, get_layer):
     """
     :param str|float|int|list[str|float|int]|dict[str]|None initial_state:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     def resolve(v):
@@ -4135,7 +4170,7 @@ class BaseChoiceLayer(LayerBase):
   def cls_get_search_beam_size(
     cls, network, beam_size, search=NotSpecified, sources=(), _src_common_search_choices=None, **kwargs):
     """
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param list[LayerBase] sources:
     :param int|None beam_size: the outgoing beam size. i.e. our output will be (batch * beam_size, ...)
     :param NotSpecified|bool search:
@@ -4149,10 +4184,6 @@ class BaseChoiceLayer(LayerBase):
       # Note: _src_common_search_choices might not be set during template construction,
       # but this fallback would still work then (at least for ChoiceLayer).
       if sources:
-        if not sources[0] or sources[0].output.undefined:
-          from returnn.tf.network import CannotHandleUndefinedSourcesException
-          raise CannotHandleUndefinedSourcesException(
-            layer_name=kwargs["name"], layer_desc=dict(sources=sources, beam_size=beam_size, network=network, **kwargs))
         return sources[0].output.beam.beam_size if sources[0].output.beam else None
       return None
     return beam_size
@@ -4161,7 +4192,7 @@ class BaseChoiceLayer(LayerBase):
   @classmethod
   def get_rec_initial_extra_outputs(cls, network, beam_size, **kwargs):
     """
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param int beam_size:
     :rtype: dict[str,tf.Tensor]
     """
@@ -4192,7 +4223,7 @@ class BaseChoiceLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     if "rec_previous_layer" in d:
@@ -4745,7 +4776,7 @@ class ChoiceLayer(BaseChoiceLayer):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     assert d.get("from", NotSpecified) is not NotSpecified, "specify 'from' explicitly for choice layer"
@@ -4779,13 +4810,11 @@ class ChoiceLayer(BaseChoiceLayer):
     :param str name:
     :param int beam_size:
     :param list[LayerBase] sources:
-    :param TFNetwork.TFNetwork network:
-    :rtype: TFUtil.SearchBeam
+    :param returnn.tf.network.TFNetwork network:
+    :rtype: returnn.tf.util.data.SearchBeam
     """
     from returnn.tf.util.basic import SearchBeam
-    search_dep = NotSpecified
-    if sources and sources[0] and not sources[0].output.undefined:
-      search_dep = sources[0].output.beam
+    search_dep = sources[0].output.beam
     return SearchBeam(
       beam_size=beam_size, dependency=search_dep,
       name="%s%s" % (network.get_absolute_name_prefix(), name))
@@ -4797,7 +4826,7 @@ class ChoiceLayer(BaseChoiceLayer):
     :param str name:
     :param list[LayerBase] sources:
     :param str target:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param int beam_size:
     :param NotSpecified|bool search:
     :param dict|bool scheduled_sampling:
@@ -4813,8 +4842,6 @@ class ChoiceLayer(BaseChoiceLayer):
     else:  # no target. i.e. we must do search
       assert search, "%s %r: no target given, must do search" % (cls.__name__, name)
       # Output will be the sparse version of the input.
-      if not sources[0] or sources[0].output.undefined:
-        return Data.create_undefined(name="%s_output" % name)
       out_data = sources[0].output.copy_template().copy_as_batch_major()
       shape = list(out_data.batch_shape)
       del shape[out_data.feature_dim_axis]
@@ -4939,7 +4966,7 @@ class DecideLayer(BaseChoiceLayer):
   @classmethod
   def cls_get_search_beam_size(cls, network=None, **kwargs):
     """
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: int|None
     """
     if network.search_flag:
@@ -5001,7 +5028,7 @@ class DecideLayer(BaseChoiceLayer):
     """
     :param str name:
     :param list[LayerBase] sources:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: Data
     """
     assert len(sources) == 1
@@ -5047,7 +5074,7 @@ class DecideKeepBeamLayer(BaseChoiceLayer):
   def cls_get_search_beam_size(cls, sources, network, **kwargs):
     """
     :param list[LayerBase] sources:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: int|None
     """
     assert len(sources) == 1
@@ -5067,7 +5094,7 @@ class DecideKeepBeamLayer(BaseChoiceLayer):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     d.setdefault("from", [])  # using "data" does not make much sense
@@ -5079,7 +5106,7 @@ class DecideKeepBeamLayer(BaseChoiceLayer):
     """
     :param str name:
     :param list[LayerBase] sources:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: Data
     """
     assert len(sources) == 1
@@ -5106,7 +5133,7 @@ class ChoiceGetBeamScoresLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     d.setdefault("from", [])  # using "data" does not make much sense
@@ -5144,7 +5171,7 @@ class ChoiceGetSrcBeamsLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     d.setdefault("from", [])  # using "data" does not make much sense
@@ -5224,7 +5251,7 @@ class AttentionBaseLayer(_ConcatInputLayer):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param get_layer:
     """
     super(AttentionBaseLayer, cls).transform_config_dict(d, network=network, get_layer=get_layer)
@@ -5272,7 +5299,7 @@ class GlobalAttentionContextBaseLayer(AttentionBaseLayer):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param get_layer:
     """
     super(GlobalAttentionContextBaseLayer, cls).transform_config_dict(d, network=network, get_layer=get_layer)
@@ -5353,7 +5380,7 @@ class GenericAttentionLayer(AttentionBaseLayer):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param get_layer:
     """
     d.setdefault("from", [])
@@ -5880,7 +5907,7 @@ class SelfAttentionLayer(_ConcatInputLayer):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param get_layer:
     """
     super(SelfAttentionLayer, cls).transform_config_dict(d, network=network, get_layer=get_layer)
@@ -5896,13 +5923,8 @@ class SelfAttentionLayer(_ConcatInputLayer):
     :rtype: Data
     """
     assert sources
-    defined_sources = [src for src in sources if src and not src.output.undefined]
-    if not defined_sources:
-      from returnn.tf.network import CannotHandleUndefinedSourcesException
-      raise CannotHandleUndefinedSourcesException(
-        layer_name=name, layer_desc=dict(n_out=n_out, sources=sources, **kwargs))
     import numpy
-    out = defined_sources[0].output.copy_as_batch_major().copy(name="%s_output" % name)
+    out = sources[0].output.copy_as_batch_major().copy(name="%s_output" % name)
     if out.sparse:
       out.dtype = "float32"
       out.sparse = False
@@ -6054,7 +6076,7 @@ class PositionalEncodingLayer(_ConcatInputLayer):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str)->LayerBase) get_layer:
     """
     if d.get("from", None) is None:
@@ -6070,7 +6092,7 @@ class PositionalEncodingLayer(_ConcatInputLayer):
   def get_out_data_from_opts(cls, name, network, add_to_input=False, sources=(), **kwargs):
     """
     :param str name:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param bool add_to_input:
     :param list[LayerBase] sources:
     :rtype: Data
@@ -6316,7 +6338,7 @@ class EditDistanceTableLayer(LayerBase):
     :param list[LayerBase] sources:
     :param str name:
     :param str target:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: dict[str,tf.Tensor]
     """
     assert len(sources) == 1, "%s %r: expects exactly a single source" % (cls.__name__, name)
@@ -6346,7 +6368,7 @@ class EditDistanceTableLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param get_layer:
     """
     d.setdefault("n_out", None)  # avoid the default NotSpecified behavior, because we use target differently
@@ -6360,14 +6382,10 @@ class EditDistanceTableLayer(LayerBase):
     :param str target:
     :param dict[str,LayerBase] _target_layers:
     :param int|None blank_idx:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: Data
     """
     assert len(sources) == 1, "%s %r: expects exactly a single source" % (cls.__name__, name)
-    if not sources[0] or sources[0].output.undefined:
-      from returnn.tf.network import CannotHandleUndefinedSourcesException
-      raise CannotHandleUndefinedSourcesException(
-        layer_name=name, layer_desc=dict(sources=sources, target=target, network=network, **kwargs))
     source_data = sources[0].output
     assert source_data.dtype == "int32" and source_data.batch_ndim <= 2 and source_data.sparse
     assert target, "%s %r: 'target' must be set" % (cls.__name__, name)
@@ -6456,7 +6474,7 @@ class OptimalCompletionsLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param get_layer:
     """
     super(OptimalCompletionsLayer, cls).transform_config_dict(d, network=network, get_layer=get_layer)
@@ -6473,14 +6491,10 @@ class OptimalCompletionsLayer(LayerBase):
     :param str target:
     :param dict[str,LayerBase] _target_layers:
     :param int|None blank_idx:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: Data
     """
     assert len(sources) == 1, "%s %r: expects exactly a single source" % (cls.__name__, name)
-    if not sources[0] or sources[0].output.undefined:
-      from returnn.tf.network import CannotHandleUndefinedSourcesException
-      raise CannotHandleUndefinedSourcesException(
-        layer_name=name, layer_desc=dict(sources=sources, target=target, network=network, **kwargs))
     source_data = sources[0].output
     assert source_data.dtype == "int32" and source_data.batch_ndim == 2
     assert target, "%s %r: 'target' must be set" % (cls.__name__, name)
@@ -6670,7 +6684,7 @@ class MaskedComputationLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     masked_from = d.pop("masked_from", None)
@@ -6700,7 +6714,7 @@ class MaskedComputationLayer(LayerBase):
                        get_layer=None, _parent_layer_cache=None, **kwargs):
     """
     :param str name:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param list[LayerBase] sources:
     :param dict[str] unit:
     :param LayerBase masked_from:
@@ -6730,6 +6744,8 @@ class MaskedComputationLayer(LayerBase):
       if not network.is_inside_rec_layer() and source:
         source_data = source.output.copy_template().copy_as_time_major()
         # Create own dummy time, to make sure we have some own custom.
+        if source_data.size_placeholder is None:
+          source_data.size_placeholder = {}
         source_data.size_placeholder[0] = tf_compat.v1.placeholder(tf.int32, shape=[None], name="dummy_time")
         source = WrappedInternalLayer(
           base_layer=source, network=source.network, name=source.name,
@@ -6753,6 +6769,8 @@ class MaskedComputationLayer(LayerBase):
       if not network.is_inside_rec_layer():
         # noinspection PyShadowingNames
         source_data = layer.output.copy_template().copy_as_time_major()
+        if source_data.size_placeholder is None:
+          source_data.size_placeholder = {}
         source_data.size_placeholder[0] = source.output.get_sequence_lengths()
         layer = WrappedInternalLayer(
           base_layer=layer, network=layer.network, name=layer.name,
@@ -6770,7 +6788,7 @@ class MaskedComputationLayer(LayerBase):
   @classmethod
   def get_out_data_from_opts(cls, network, **kwargs):
     """
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :rtype: Data
     """
     layer_class, layer_desc = cls._create_template(network=network, **kwargs)
@@ -6789,13 +6807,13 @@ class MaskedComputationLayer(LayerBase):
   def get_losses(cls, name, network, output, loss=None, reduce_func=None, layer=None, **kwargs):
     """
     :param str name: layer name
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param Loss|None loss: argument just as for __init__
     :param Data output: the output (template) for the layer
     :param LayerBase|None layer:
     :param ((tf.Tensor)->tf.Tensor)|None reduce_func:
     :param kwargs: other layer kwargs
-    :rtype: list[TFNetwork.LossHolder]
+    :rtype: list[returnn.tf.network.LossHolder]
     """
     from returnn.tf.network import LossHolder
     # See SubnetworkLayer.get_losses as another example.
@@ -6946,7 +6964,7 @@ class UnmaskLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     super(UnmaskLayer, cls).transform_config_dict(d, network=network, get_layer=get_layer)
@@ -6956,20 +6974,17 @@ class UnmaskLayer(LayerBase):
   def get_out_data_from_opts(cls, name, network, sources, mask, **kwargs):
     """
     :param str name:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param list[LayerBase] sources:
     :param LayerBase mask:
     :rtype: Data
     """
     assert len(sources) == 1
     source, = sources
-    assert isinstance(source, LayerBase) or source is None
-    if not source or source.output.undefined:
-      return Data.create_undefined(name="%s_output" % name)
+    assert isinstance(source, LayerBase)
     out = source.output.copy(name="%s_output" % name)
     assert isinstance(out, Data)
-    if mask and not mask.output.undefined:
-      out.beam = SearchBeam.get_combined_beam(out.beam, mask.output.beam)
+    out.beam = SearchBeam.get_combined_beam(out.beam, mask.output.beam)
     if network.is_inside_rec_layer():
       if out.have_time_axis():
         # The masked-computation layer could have been moved out. In that case, it will return some output
@@ -8032,11 +8047,15 @@ class ZoneoutLSTMCell(BaseRNNCell):
 
     from returnn.tf.util.basic import cond
     c = cond(self.is_training,
-             lambda: (1 - self._zoneout_cell) * tf.nn.dropout(new_c - prev_c, (1 - self._zoneout_cell)) + prev_c,
+             lambda: (1 - self._zoneout_cell) * tf_compat.v1.nn.dropout(
+               new_c - prev_c,
+               keep_prob=(1 - self._zoneout_cell)) + prev_c,
              lambda: (1 - self._zoneout_cell) * new_c + self._zoneout_cell * prev_c)
 
     h = cond(self.is_training,
-             lambda: (1 - self._zoneout_outputs) * tf.nn.dropout(new_h - prev_h, (1 - self._zoneout_outputs)) + prev_h,
+             lambda: (1 - self._zoneout_outputs) * tf_compat.v1.nn.dropout(
+               new_h - prev_h,
+               keep_prob=(1 - self._zoneout_outputs)) + prev_h,
              lambda: (1 - self._zoneout_outputs) * new_h + self._zoneout_outputs * prev_h)
 
     new_state = rnn_cell.LSTMStateTuple(c, h)
@@ -8125,6 +8144,7 @@ class RelativePositionalEncodingLayer(_ConcatInputLayer):
     data = data.copy_template().copy_as_batch_major()
     data.batch_dim_axis = None
     data.feature_dim_axis = NotSpecified
+    data.dim = n_out
     if data.have_time_axis():
       data.time_dim_axis = 0
       data.shape = (None, None, n_out)

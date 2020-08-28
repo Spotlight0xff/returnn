@@ -3,12 +3,11 @@
 
 from __future__ import print_function
 
+import _setup_test_env  # noqa
 import logging
-logging.getLogger('tensorflow').disabled = True
 import tensorflow as tf
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nose.tools import assert_equal, assert_not_equal, assert_is_instance
 from numpy.testing.utils import assert_almost_equal, assert_allclose
 import unittest
@@ -16,7 +15,6 @@ import numpy.testing
 from pprint import pprint
 import contextlib
 from returnn.util import better_exchook
-better_exchook.replace_traceback_format_tb()
 
 from returnn.log import log
 from returnn.config import Config
@@ -726,7 +724,7 @@ def test_cudnn_save_restore():
 @unittest.skipIf(not is_gpu_available(), "no gpu on this system")
 def test_cudnn_rnn_params_to_canonical():
   # https://github.com/tensorflow/tensorflow/issues/9370
-  from tensorflow.contrib.cudnn_rnn import CudnnLSTM
+  from tensorflow.contrib.cudnn_rnn import CudnnLSTM  # noqa
   with tf_compat.v1.Session() as session:
     def check(**kwargs):
       print("kwargs:", kwargs)
@@ -1142,8 +1140,7 @@ def test_rec_explicit_lstm():
       "c": {"class": "eval", "from": ["input_gate", "cell_in", "forget_gate", "prev:c"],
             "eval": "source(0) * source(1) + source(2) * source(3)"},
       "output": {"class": "eval", "from": ["output_gate", "c"],
-                 "eval": "source(0) * source(1)",
-                 "out_type": {"shape": (10,)}},
+                 "eval": "source(0) * source(1)"},
     }},
     "output": {"class": "softmax", "loss": "ce", "from": "lstm"}
   }
@@ -2116,7 +2113,7 @@ def test_target_with_beam():
       "teacher_s": {"class": "rnn_cell", "unit": "LSTMBlock", "from": ["prev:teacher_target_embed", "prev:teacher_att"],
                     "n_out": 5, "dropout": 0.3, "trainable": False},  # transform
       "teacher_readout_in": {"class": "linear", "from": ["teacher_s", "prev:teacher_target_embed", "teacher_att"],
-                             "activation": None, "n_out": 1000, "dropout": 0.3, "trainable": False},
+                             "activation": None, "n_out": 10, "dropout": 0.3, "trainable": False},
       # merge + post_merge bias
       "teacher_readout": {"class": "reduce_out", "mode": "max", "num_pieces": 2, "from": ["teacher_readout_in"],
                           "trainable": False},
@@ -2211,7 +2208,7 @@ def test_target_with_beam():
     session.run(tf_compat.v1.global_variables_initializer())
 
     from test_TFNetworkLayer import make_feed_dict
-    feed_dict = make_feed_dict([network.extern_data.data[key] for key in ["data", "classes"]])
+    feed_dict = make_feed_dict([network.extern_data.data[key] for key in ["data", "classes"]], n_batch=3)
     x, y, loss = session.run((x_data.placeholder, y_data.placeholder, network.get_total_loss()), feed_dict=feed_dict)
     assert x.shape[x_data.batch_dim_axis] * beam_size == y.shape[y_data.batch_dim_axis]
 
@@ -4711,6 +4708,141 @@ def test_MaskedComputationLayer_UnmaskLayer_in_loop():
         x = y
 
 
+def test_att_train_search_loss_prev_beam():
+  beam_size = 1
+  num_ner_labels = 13
+  net_dict = {
+    'output': {
+      'class': 'rec',
+      'from': 'data',
+      'target': 'classes',
+      'unit': {
+        'crf_rec_in': {"class": "linear", "from": 'prev:classes_copy', "activation": None, "n_out": 10},
+        'crf_rec': {'class': 'linear', 'from': ['raw', 'crf_rec_in'], "activation": "relu",
+                    "target": 'classes'},
+        'enc_ctx_slice': {'class': 'copy', 'from': 'data:source'},
+        'source_embed_slice': {'class': 'copy', 'from': 'data:source'},
+        'output': {
+          'beam_size': beam_size, 'class': 'choice', 'from': ['crf_rec'], 'initial_output': 0, 'target': 'classes'},
+        'raw': {'class': 'linear',
+                'from': ['enc_ctx_slice', 'lstm_tgt'],
+                'n_out': num_ner_labels,
+                'activation': None,
+                'is_output_layer': True},
+        'classes_copy': {'class': 'copy', 'from': 'output', "initial_output": 0},
+        'is_O': {"class": "compare", "kind": "equal", "from": ["prev:classes_copy"], "value": 0},
+        'tgt_lstm_input': {"class": "switch", "condition": "is_O",
+                           "true_from": "source_embed_slice", "false_from": "prev:target_embed"},
+        'lstm_tgt': {'class': 'rec', 'from': ['tgt_lstm_input'], 'n_out': 12, 'unit': 'nativelstm2'},
+        'target_embed': {
+          'class': 'linear', 'activation': None, 'from': 'output', 'initial_output': 0, 'n_out': 10}
+      }
+    },
+    'loss_layer': {
+      'class': 'linear', "activation": "softmax", "target": "classes", 'from': ['output/raw'], 'loss': 'ce'},
+  }
+  with make_scope() as session:
+    config = Config({"debug_print_layer_output_template": True})
+    net = TFNetwork(
+      extern_data=ExternData({
+        "data": {"dim": 10},
+        "classes": {"dim": 20, "sparse": True}}),
+      config=config,
+      train_flag=True, search_flag=True)
+    net.construct_from_dict(net_dict)
+    net.maybe_construct_objective()
+    print(net.losses_dict)
+
+    net.initialize_params(session)
+
+    from test_TFNetworkLayer import make_feed_dict
+    feed_dict = make_feed_dict(net.extern_data, same_time=True)
+    loss = session.run(net.total_loss, feed_dict=feed_dict)
+    print("loss:", loss)
+
+
+def test_MaskedComputationLayer_search_choices_resolution():
+  beam_size = 3
+  EncKeyTotalDim = 10
+  AttNumHeads = 1
+  target = "classes"
+  num_classes = 13
+  blank_idx = num_classes - 2
+  from test_TFNetworkLayer import make_feed_dict
+  net_dict = {
+    "encoder": {"class": "linear", "from": "data", "activation": "relu", "n_out": EncKeyTotalDim},
+    "enc_ctx": {"class": "copy", "from": "encoder"},
+    "enc_value": {"class": "copy", "from": "encoder"},
+    "inv_fertility": {"class": "linear", "activation": "sigmoid", "from": "encoder", "n_out": AttNumHeads},
+    "output": {"class": "rec", "from": [], "unit": {
+      'output': {'class': 'choice', 'target': target, 'beam_size': beam_size, 'from': ["output_prob"],
+                 "initial_output": 0},
+      "end": {"class": "compare", "from": ["output"], "value": 0},
+      'target_embed': {'class': 'linear', 'activation': None, "with_bias": False, 'from': ['output'], "n_out": 12,
+                       "initial_output": 0},
+      "weight_feedback": {"class": "linear", "activation": None, "with_bias": False,
+                          "from": ["prev:accum_att_weights"], "n_out": EncKeyTotalDim},
+      "s_transformed": {"class": "linear", "activation": None,
+                           "with_bias": False, "from": ["masked_s"],
+                           "n_out": EncKeyTotalDim},
+      "energy_in": {"class": "combine", "kind": "add",
+                    "from": ["base:enc_ctx", "weight_feedback",
+                             "s_transformed"], "n_out": EncKeyTotalDim},
+      "energy_tanh": {"class": "activation", "activation": "tanh",
+                      "from": ["energy_in"]},
+      "energy": {"class": "linear", "activation": None, "with_bias": False,
+                 "from": ["energy_tanh"], "n_out": AttNumHeads},  # (B, enc-T, H)
+      "att_weights": {"class": "softmax_over_spatial", "from": ["energy"]},  # (B, enc-T, H)
+      "accum_att_weights": {"class": "eval", "from": ["prev:accum_att_weights", "att_weights", "base:inv_fertility"],
+                            "eval": "source(0) + source(1) * source(2) * 0.5",
+                            "out_type": {"dim": AttNumHeads, "shape": (None, AttNumHeads)}},
+      "att0": {"class": "generic_attention", "weights": "att_weights", "base": "base:enc_value"},  # (B, H, V)
+      "att": {"class": "merge_dims", "axes": "static", "from": "att0"},  # (B, H*V)
+
+      'not_blank_mask': {'class': 'compare', 'from': ['output'], 'value': blank_idx, 'kind': 'not_equal',
+                         'initial_output': True},
+      'masked_s': {
+        'class': 'masked_computation', 'mask': 'prev:not_blank_mask',
+        'unit': {"class": "rec", "unit": "NativeLSTM2", "from": ["prev:target_embed", "prev:att"], "n_out": 10},
+        'from': 'prev:output'
+      },
+
+      "readout_in": {"class": "linear", "from": ["masked_s", "prev:target_embed", "att"], "activation": None,
+                     "n_out": 10},
+      "readout": {"class": "reduce_out", "mode": "max", "num_pieces": 2, "from": ["readout_in"]},
+      "output_prob": {"class": "softmax", "from": ["readout"], "target": target, "loss": "ce"}
+    }, "target": target, "max_seq_len": "max_len_from('base:encoder')"},
+
+  }
+  with make_scope() as session:
+    config = Config({"debug_print_layer_output_template": True})
+    extern_data = ExternData({
+      "data": {"dim": 20, "sparse": True},
+      target: {"dim": num_classes, "sparse": True}})
+    feed_dict = make_feed_dict(extern_data)
+
+    print("***** Construct train net.")
+    train_net = TFNetwork(extern_data=extern_data, config=config, train_flag=True)
+    train_net.construct_from_dict(net_dict)
+    loss = train_net.get_total_loss()
+    optimizer = tf_compat.v1.train.AdamOptimizer(learning_rate=0.1)
+    with tf.control_dependencies([optimizer.minimize(loss)]):
+      loss = tf.identity(loss)
+    session.run(tf_compat.v1.global_variables_initializer())
+    loss_values = []
+    for step in range(10):
+      loss_values.append(session.run(loss, feed_dict=feed_dict))
+      print("loss:", loss_values[-1])
+    assert all([loss_values[i + 1] < loss_values[i] for i in range(len(loss_values) - 1)])
+    print()
+
+    print("***** Construct search net.")
+    search_net = TFNetwork(extern_data=extern_data, config=config, search_flag=True)
+    search_net.construct_from_dict(net_dict)
+    out = search_net.get_default_output_layer().output.placeholder
+    print("out:", session.run(out, feed_dict=feed_dict))
+
+
 def test_MaskedComputationLayer_UnmaskLayer_masked_outside():
   from returnn.tf.layers.rec import _SubnetworkRecCell
   with make_scope() as session:
@@ -5460,6 +5592,89 @@ def test_trafo_search_lm():
       assert all(out_seqs[i, :input_seq_lens[i]] == input_seqs[i, :input_seq_lens[i]])
 
 
+def test_cumulated_attention_weights_search():
+  rnd = numpy.random.RandomState(42)
+  beam_size = 5
+  dim = 7
+
+  # Config works during training, but building graph raises exception during search:
+  # Trying to reshape input tensor with n values into tensor with n * beam_size values
+  net_dict = {
+    'source_embed': { 'class': 'linear', 'activation': None, 'n_out': dim},
+    'output': {
+      'class': 'rec',
+      'from': [],
+      'max_seq_len': "max_len_from('base:source_embed') * 3",
+      'target': 'classes',
+      'unit': {
+          'target_embed': { 'class': 'linear', 'activation': None, 'from': ['prev:output'], 'n_out': dim},
+          'att_energy': {
+            'class': 'dot', 'from': ['base:source_embed', 'target_embed'],
+            'red1': -1, 'red2': -1, 'var1': 'T', 'var2': 'T?', 'add_var2_if_empty': False},
+          'cum_att_energy': {'class': 'combine', 'kind': 'add', 'from': ['prev:att_energy', 'att_energy']},
+          'att_weights': {
+            'class': 'softmax_over_spatial', 'from': ['cum_att_energy'], 'axis': 'stag:extern_data:data'},
+          'att': { 'class': 'generic_attention', 'base': 'base:source_embed', 'weights': 'att_weights'},
+          'output_prob': { 'class': 'softmax', 'from': ['att'], 'loss': 'ce', 'target': 'classes'},
+          'output': {
+            'beam_size': beam_size, 'class': 'choice', 'from': ['output_prob'],
+            'initial_output': 0, 'target': 'classes'},
+          'end': {'class': 'compare', 'from': ['output'], 'value': 0},
+      }},
+    'decision': {'class': 'decide', 'from': ['output'], 'loss': 'edit_distance', 'loss_opts': {}, 'target': 'classes'},
+  }
+
+  n_batch, n_in, n_time = 3, 19, 9
+  n_out = n_in
+
+  config = Config()
+  config.update({
+    "extern_data": {"data": {"dim": n_out, "sparse": True}, "classes": {"dim": n_out, "sparse": True}},
+    "search_output_layer": "decision",
+    "debug_print_layer_output_shape": True,
+    "debug_print_layer_output_template": True})
+
+  # Try different permutations of the cum_att_energy inputs, previously these behaved differently
+  for source_layers in [["prev:att_energy", "att_energy"], ["att_energy", "prev:att_energy"]]:
+    with make_scope() as session:
+      network = TFNetwork(config=config, train_flag=False, search_flag=True)
+      pprint(network.extern_data.data)
+      net_dict["output"]["unit"]["cum_att_energy"]["from"] = source_layers
+      network.construct_from_dict(net_dict)
+
+      fetches = network.get_fetches_dict()
+      data_input = network.extern_data.data["data"]
+      assert data_input.batch_shape == (None, None)
+      output_out = network.get_layer("decision").output
+      assert output_out.is_batch_major and output_out.sparse and output_out.dim == n_out and output_out.shape == (None,)
+
+      input_seq_lens = numpy.array([n_time, n_time - 5, n_time - 4], dtype="int32")
+      assert input_seq_lens.shape == (n_batch,) and all(input_seq_lens > 0)
+      input_seqs = rnd.randint(1, n_out, size=(n_batch, n_time,), dtype="int32")
+      print("input:")
+      print(input_seqs)
+      print("lens:", input_seq_lens)
+
+      session.run(tf_compat.v1.variables_initializer(tf_compat.v1.global_variables() + [network.global_train_step]))
+      fetches = (fetches, output_out.placeholder, output_out.get_sequence_lengths())
+      feed_dict = {
+        data_input.placeholder: input_seqs,
+        data_input.size_placeholder[0]: input_seq_lens}
+      try:
+        info, out_seqs, out_seq_lens = session.run(fetches, feed_dict=feed_dict)
+      except Exception as exc:
+        print("EXCEPTION:", type(exc), exc)
+        help_on_tf_exception(session=session, exception=exc, fetches=fetches, feed_dict=feed_dict)
+        raise
+      print(info)
+      print("output:")
+      print(out_seqs)  # random...
+      print("lens:", out_seq_lens)
+      assert isinstance(out_seqs, numpy.ndarray) and isinstance(out_seq_lens, numpy.ndarray)
+      assert len(out_seqs.shape) == 2 and out_seqs.shape[0] == n_batch
+      assert out_seq_lens.shape == (n_batch,)
+
+
 def test_PositionalEncodingLayer_offset_no_rec():
   # Test `offset` option when `PositionalEncodingLayer` is out of loop.
   rnd = numpy.random.RandomState(42)
@@ -5570,6 +5785,54 @@ def test_PositionalEncodingLayer_offset_in_rec():
       feed_dict={
         data_input.placeholder: rand_data,
         data_input.size_placeholder[0]: numpy.array([n_time] * n_batch, dtype="int32"),
+      })
+    print(info)
+    print(out)  # random...
+
+
+def test_RelativePositionalEncodingLayer():
+  # Test `RelativePositionalEncodingLayer` with an example similar to its example usage.
+  rnd = numpy.random.RandomState(42)
+  n_batch, n_out, n_time = 3, 5, 7
+  EncKeyTotalDim = 9
+  EncValueTotalDim = 18
+  AttNumHeads = 3
+  net_dict = {
+    'rel_pos': {
+      "class": "relative_positional_encoding",
+      "from": "data",
+      "n_out": EncKeyTotalDim // AttNumHeads
+    },
+    'output': {
+      "class": "self_attention",
+      "num_heads": AttNumHeads,
+      "total_key_dim": EncKeyTotalDim,
+      "n_out": EncValueTotalDim, "from": "data",
+      "attention_left_only": False,
+      "key_shift": 'rel_pos'
+    }
+  }
+  config = Config()
+  config.update({
+    "extern_data": {"data": {"dim": n_out, "sparse": False}},
+    "debug_print_layer_output_template": True
+  })
+  with make_scope() as session:
+    network = TFNetwork(config=config, train_flag=True)
+    pprint(network.extern_data.data)
+    network.construct_from_dict(net_dict)
+    fetches = network.get_fetches_dict()
+    data_input = network.extern_data.data["data"]
+    assert data_input.batch_shape == (None, None, n_out)
+    train_out = network.get_layer("output").output
+    session.run(tf_compat.v1.variables_initializer(tf_compat.v1.global_variables() + [network.global_train_step]))
+    rand_data = rnd.rand(n_batch, n_time, n_out)
+    outputs = [train_out.placeholder]
+    info, out = session.run(
+      (fetches, outputs),
+      feed_dict={
+        data_input.placeholder: rand_data,
+        data_input.size_placeholder[0]: numpy.array([n_time] * n_batch, dtype="float32"),
       })
     print(info)
     print(out)  # random...

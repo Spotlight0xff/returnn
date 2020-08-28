@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+"""
+Goes through a Sprint Bliss XML file, converts the audio to ogg (via ffmpeg),
+and creates a corresponding ZIP files.
+The created files are compatible with the :class:`OggZipDataset`.
+"""
+
 from __future__ import print_function
 
 import typing
@@ -16,14 +22,14 @@ import shutil
 from subprocess import check_call
 from glob import glob
 
-my_dir = os.path.dirname(os.path.abspath(__file__))
-returnn_dir = os.path.dirname(my_dir)
-sys.path.insert(0, returnn_dir)
-
+import _setup_returnn_env  # noqa
 import returnn.sprint.cache
 
 
 class BlissItem:
+  """
+  Bliss item.
+  """
   def __init__(self, segment_name, recording_filename, start_time, end_time, orth, speaker_name=None):
     """
     :param str segment_name:
@@ -46,6 +52,9 @@ class BlissItem:
 
   @property
   def delta_time(self):
+    """
+    :rtype: float
+    """
     return self.end_time - self.start_time
 
 
@@ -157,6 +166,7 @@ class SprintCacheHandler:
       items = list(iter_bliss(opt))
     return {seq.segment_name: (seq.start_time, seq.end_time) for seq in items}
 
+  # noinspection PyUnusedLocal
   def feature_post_process(self, feature_data, seq_name, **kwargs):
     """
     :param numpy.ndarray feature_data:
@@ -238,10 +248,15 @@ def hms(s):
 
 
 def main():
+  """
+  Main entry.
+  """
   arg_parser = ArgumentParser()
   arg_parser.add_argument("bliss_filename")
   arg_parser.add_argument("--subset_segment_file")
   arg_parser.add_argument("--no_ogg", help="skip generating ogg files", action="store_true")
+  arg_parser.add_argument(
+    "--no_conversion", help="skip ffmpeg call, assume audio is correct already", action="store_true")
   arg_parser.add_argument("--no_cleanup", help="don't delete our temp files", action="store_true")
   arg_parser.add_argument("--sprint_cache", help="filename of feature cache for synchronization")
   arg_parser.add_argument("--raw_sample_rate", help="sample rate of audio input", type=int, default=8000)
@@ -341,6 +356,7 @@ def main():
       start_time = 0
       limit_duration = False
     else:
+      soundfile = audio_synced = sample_rate = wav_tmp_filename = None
       source_filename = rec_filename
       start_time = seq.start_time
       limit_duration = True
@@ -352,19 +368,25 @@ def main():
       if os.path.exists(dest_filename):
         print("already exists, delete: %s" % os.path.basename(dest_filename))
         os.remove(dest_filename)
-      cmd = ["ffmpeg"]
-      if args.ffmpeg_acodec:
-        cmd += ["-acodec", args.ffmpeg_acodec]  # https://trac.ffmpeg.org/ticket/2810
-      cmd += ["-i", source_filename]
-      if args.number_of_channels > 0:
-        cmd += ["-ac", str(args.number_of_channels)]
-      if start_time:
-        cmd += ["-ss", str(start_time)]
-      if limit_duration:
-        cmd += ["-t", str(duration)]
-      cmd += [dest_filename, "-loglevel", args.ffmpeg_loglevel]
-      print("$ %s" % " ".join(cmd))
-      check_call(cmd)
+      if args.no_conversion:
+        assert source_filename.endswith(".ogg")
+        print("skip ffmpeg, copy instead (%s -> %s)" % (
+          os.path.basename(source_filename), dest_filename[len(dest_dirname) + 1:]))
+        shutil.copy(src=source_filename, dst=dest_filename)
+      else:
+        cmd = ["ffmpeg"]
+        if args.ffmpeg_acodec:
+          cmd += ["-acodec", args.ffmpeg_acodec]  # https://trac.ffmpeg.org/ticket/2810
+        cmd += ["-i", source_filename]
+        if args.number_of_channels > 0:
+          cmd += ["-ac", str(args.number_of_channels)]
+        if start_time:
+          cmd += ["-ss", str(start_time)]
+        if limit_duration:
+          cmd += ["-t", str(duration)]
+        cmd += [dest_filename, "-loglevel", args.ffmpeg_loglevel]
+        print("$ %s" % " ".join(cmd))
+        check_call(cmd)
     if args.sprint_cache:
       audio_ogg, sample_rate_ogg = soundfile.read(dest_filename)
       assert len(audio_synced) == len(audio_ogg), "Number of frames in synced wav and converted ogg do not match"

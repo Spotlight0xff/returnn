@@ -79,7 +79,7 @@ class LayerBase(object):
     See :func:`TFNetwork.construct_from_dict`.
 
     :param str name:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param Data output:
     :param NotSpecified|None|int n_out: output dim
     :param dict[str] out_type: kwargs for Data class. more explicit than n_out.
@@ -209,8 +209,8 @@ class LayerBase(object):
       func()
 
   def __repr__(self):
-    return "<%s %r out_type=%s>" % (
-      self.__class__.__name__, self.get_absolute_name(),
+    return "<%s %s%r out_type=%s>" % (
+      self.__class__.__name__, self.network.get_absolute_name_prefix(), self.name,
       self.output.get_description(with_name=False) if self.output else None)
 
   @classmethod
@@ -235,7 +235,7 @@ class LayerBase(object):
     """
     Called via BaseLayer.get_out_data_from_opts().
 
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param str name:
     :param dict[str]|None|(()->Data) out_type:
     :param int|None|NotSpecified n_out:
@@ -252,16 +252,7 @@ class LayerBase(object):
       return out_type(
         network=network, name=name, n_out=n_out, target=target, size_target=size_target, sources=sources, loss=loss,
         **kwargs)
-    if sources and [src for src in sources if src and not src.output.undefined]:
-      # Ok if we have some undefined but also some defined; filter out just the defined.
-      sources = [src for src in sources if src and not src.output.undefined]
-    if sources and (not sources[0] or sources[0].output.undefined) and not out_type:
-      from returnn.tf.network import CannotHandleUndefinedSourcesException
-      raise CannotHandleUndefinedSourcesException(
-        layer_name=name,
-        layer_desc=dict(
-          network=network, n_out=n_out, target=target, size_target=size_target, sources=sources, loss=loss,
-          **kwargs))
+    # Any template construction should be aware of that, and eventually resolve it.
     if out_type is None:
       out_type = {}  # type: typing.Dict[str]
     else:
@@ -306,10 +297,16 @@ class LayerBase(object):
               feature_dim_axis = sources_data.feature_dim_axis
             else:
               feature_dim_axis = -1
-          default_shape = list(sources_data.shape_dense)
-          default_shape.insert(sources_data.batch_dim_axis, None)
-          default_shape[feature_dim_axis] = out_type.get("dim", None)
-          default_shape.pop(out_type.get("batch_dim_axis"))
+          if sources_data.shape:
+            default_shape = list(sources_data.shape_dense)
+            default_shape.insert(sources_data.batch_dim_axis, None)
+            default_shape[feature_dim_axis] = out_type.get("dim", None)
+            default_shape.pop(out_type.get("batch_dim_axis"))
+          else:  # source is scalar
+            if out_type.get("dim") or out_type.get("feature_dim_axis") is not None:
+              default_shape = (out_type.get("dim"),)
+            else:
+              default_shape = ()
           out_type.setdefault("shape", tuple(default_shape))
       elif network.is_inside_rec_layer():
         if out_type.get("sparse", False):
@@ -335,7 +332,7 @@ class LayerBase(object):
                         **kwargs):
     """
     :param Data output:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param str|list[str]|None target:
     :param str|None size_target:
     :param dict[str,LayerBase]|None _target_layers: if target.startswith("layer:"), then this is target -> layer
@@ -425,7 +422,7 @@ class LayerBase(object):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
       The name `get_layer` might be misleading, as this should return an existing layer,
       or construct it if it does not exist yet.
@@ -527,7 +524,7 @@ class LayerBase(object):
   @classmethod
   def _guess_n_out_from_target_and_opt_loss(cls, network, target, target_layers, loss_class_name, get_layer):
     """
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param str target: e.g. "classes"
     :param dict[str,LayerBase] target_layers:
     :param str|None loss_class_name: e.g. "ce" or None
@@ -553,7 +550,7 @@ class LayerBase(object):
     """
     :param str|None class_name:
     :param dict[str]|None opts:
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     :param bool always_make:
     :rtype: Loss|None
@@ -951,7 +948,7 @@ class LayerBase(object):
     """
     :param str target:
     :param dict[str,LayerBase]|None _target_layers: if target.startswith("layer:"), then this is target -> layer
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param bool mark_data_key_as_used: forwarded self.network.get_extern_data()
     :param None|((str) -> LayerBase) get_layer: function to get or construct another layer
     :param SearchChoices|None search_choices:
@@ -1031,7 +1028,7 @@ class LayerBase(object):
     When overriding this, make sure that it works both with `layer` set and unset.
 
     :param str name: layer name
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param Loss|None loss: argument just as for __init__
     :param Data output: the output (template) for the layer
     :param LayerBase|None layer:
@@ -1043,7 +1040,7 @@ class LayerBase(object):
       However, if you provide reduce_func = TFUtil.identity, you can get the unreduced tensor.
     :param kwargs: all the remaining __init__ args
     :return: the losses defined by this layer
-    :rtype: list[TFNetwork.LossHolder]
+    :rtype: list[returnn.tf.network.LossHolder]
     """
     if not loss:
       return []
@@ -1058,7 +1055,7 @@ class LayerBase(object):
 
     :param ((tf.Tensor)->tf.Tensor)|None reduce_func: as in get_losses
     :return: the losses defined by this layer
-    :rtype: list[TFNetwork.LossHolder]
+    :rtype: list[returnn.tf.network.LossHolder]
     """
     return self.__class__.get_losses(reduce_func=reduce_func, layer=self, **self.kwargs)
 
@@ -1161,8 +1158,8 @@ class LayerBase(object):
         mean, variance = tf_compat.v1.nn.moments(x, axes=data.get_axes(exclude_feature=True), keep_dims=True)
       if sample_mean is None:
         with self.var_creation_scope():
-          sample_mean = self.add_param(tf.Variable(
-            initial_value=tf.zeros(data.get_bc_spatial_batch_shape()),
+          sample_mean = self.add_param(tf_compat.v1.get_variable(
+            shape=data.get_bc_spatial_batch_shape(), initializer=tf_compat.v1.zeros_initializer(),
             name="%s_%s_mean" % (self.name, data.name),
             trainable=False))
         # Use exponential moving average of batch mean.
@@ -1171,8 +1168,8 @@ class LayerBase(object):
       if sample_variance is None:
         # Note: Our Theano implementation does not use a moving average for this.
         with self.var_creation_scope():
-          sample_variance = self.add_param(tf.Variable(
-            initial_value=tf.ones(data.get_bc_spatial_batch_shape()),
+          sample_variance = self.add_param(tf_compat.v1.get_variable(
+            shape=data.get_bc_spatial_batch_shape(), initializer=tf_compat.v1.ones_initializer(),
             name="%s_%s_variance" % (self.name, data.name),
             trainable=False))
         sample_variance = tf_compat.v1.assign_add(sample_variance, (variance - sample_variance) * momentum)
@@ -1184,16 +1181,16 @@ class LayerBase(object):
       if use_std:
         if gamma is None:
           with self.var_creation_scope():
-            gamma = self.add_param(tf.Variable(
-              initial_value=tf.ones(data.get_bc_spatial_batch_shape()),
+            gamma = self.add_param(tf_compat.v1.get_variable(
+              shape=data.get_bc_spatial_batch_shape(), initializer=tf_compat.v1.ones_initializer(),
               name="%s_%s_gamma" % (self.name, data.name),
               trainable=True))
         bn *= gamma
       if use_shift:
         if beta is None:
           with self.var_creation_scope():
-            beta = self.add_param(tf.Variable(
-              initial_value=tf.zeros(data.get_bc_spatial_batch_shape()),
+            beta = self.add_param(tf_compat.v1.get_variable(
+              shape=data.get_bc_spatial_batch_shape(), initializer=tf_compat.v1.zeros_initializer(),
               name="%s_%s_beta" % (self.name, data.name),
               trainable=True))
         bn += beta
@@ -1396,7 +1393,7 @@ class ReuseParams:
           None would be interpret as the option `auto_create_missing`.
           A dict would specify :func:`ReuseParams.__init__` options.
             The option reuse_layer would be specified as a str, and represents a layer name.
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     :rtype: ReuseParams|None
     """
@@ -1408,10 +1405,10 @@ class ReuseParams:
       :param str layer_name:
       :rtype: LayerBase|ReuseParams.LazyLayerResolver
       """
-      from returnn.tf.network import NetworkConstructionDependencyLoopException
+      from returnn.tf.network import NetworkConstructionDependencyLoopException, LayerNotFound
       try:
         return get_layer(layer_name)
-      except NetworkConstructionDependencyLoopException:
+      except (NetworkConstructionDependencyLoopException, LayerNotFound):
         # This dependency loop is not seen as critical. We allow it to be done later.
         # So any template construction of this layer should work.
         return ReuseParams.LazyLayerResolver(layer_name=layer_name, network=network, get_layer=get_layer)
@@ -1454,7 +1451,7 @@ class ReuseParams:
     def __init__(self, layer_name, network, get_layer):
       """
       :param str layer_name:
-      :param TFNetwork.TFNetwork network:
+      :param returnn.tf.network.TFNetwork network:
       :param ((str) -> LayerBase) get_layer:
       """
       self.layer_name = layer_name
@@ -1462,21 +1459,23 @@ class ReuseParams:
       self.get_layer_func = get_layer
       self.var_scope = tf_compat.v1.get_variable_scope()
 
+    def __repr__(self):
+      return "<%s layer %r, net %r>" % (self.__class__.__name__, self.layer_name, self.network)
+
     def get_layer(self):
       """
       :rtype: LayerBase
       """
-      from returnn.tf.network import NetworkConstructionDependencyLoopException
+      from returnn.tf.network import NetworkConstructionDependencyLoopException, LayerNotFound
       from returnn.tf.util.basic import reuse_name_scope
       with reuse_name_scope(self.var_scope):
         try:
           return self.get_layer_func(self.layer_name)
-        except NetworkConstructionDependencyLoopException as exc:
-          return self.create_dummy_layer(dep_loop_exception=exc)
+        except (NetworkConstructionDependencyLoopException, LayerNotFound):
+          return self.create_dummy_layer()
 
-    def create_dummy_layer(self, dep_loop_exception):
+    def create_dummy_layer(self):
       """
-      :param TFNetwork.NetworkConstructionDependencyLoopException dep_loop_exception:
       :rtype: LayerBase
       """
       from .basic import get_layer_class
@@ -1485,43 +1484,78 @@ class ReuseParams:
          "thus creating it on dummy inputs now") % self.layer_name,
         file=log.v4)
 
-      def opt_get_layer(layer_name):
-        """
-        :param str layer_name:
-        :rtype: LayerBase|None
-        """
-        if layer_name in self.network.layers:
-          return self.network.layers[layer_name]
-        print("ReuseParams: non-existing layer %r, ignoring..." % layer_name, file=log.v4)
-        return None
+      layer_name = self.layer_name
+      network = self.network
+      with_time_dim = False
+      while layer_name.startswith("base:") and network.parent_net:
+        if network.parent_layer and network.parent_layer.output.have_time_axis():
+          with_time_dim = True
+        layer_name = layer_name[len("base:"):]
+        network = network.parent_net
 
+      # noinspection PyShadowingNames
       def get_dummy_input_layer(layer_name):
         """
         :param str layer_name:
         :rtype: LayerBase
         """
-        if layer_name in self.network.layers:
-          return self.network.layers[layer_name]
-        print("ReuseParams: creating dummy input %r" % layer_name, file=log.v4)
-        layer_desc_ = dep_loop_exception.net_dict[layer_name].copy()
-        class_name_ = layer_desc_.pop("class")
-        layer_class_ = get_layer_class(class_name_)
-        layer_class_.transform_config_dict(layer_desc_, network=self.network, get_layer=opt_get_layer)
-        # noinspection PyProtectedMember
-        layer_desc_ = self.network._create_layer_layer_desc(name=layer_name, layer_desc=layer_desc_)
-        output = layer_class_.get_out_data_from_opts(**layer_desc_).copy()
+        if layer_name in network.layers:
+          return network.layers[layer_name]
+        output = None
+        net = network
+
+        # noinspection PyShadowingNames
+        def opt_get_layer(layer_name):
+          """
+          :param str layer_name:
+          :rtype: LayerBase
+          """
+          if layer_name in net.layers:
+            return net.layers[layer_name]
+          print("ReuseParams: non-existing layer %r in %r, ignoring..." % (layer_name, net), file=log.v4)
+          return InternalLayer(
+            name=layer_name, network=net,
+            output=Data(
+              name="LazyLayerResolver_dummy_output_%s" % layer_name,
+              shape=(None, 1) if with_time_dim else ()))
+
+        if self.network.parent_net is network and self.network.parent_layer:
+          if layer_name.startswith(self.network.parent_layer.name + "/"):
+            net = self.network
+            layer_name = layer_name[len(net.parent_layer.name) + 1:]
+            if layer_name in net.layers:
+              # Don't return layer, could be inside loop and that wont work.
+              output = net.layers[layer_name].output.copy_template()
+              if not output.have_time_axis() and with_time_dim:
+                output = output.copy_template_adding_time_dim()
+        if not output:
+          layer_desc_ = net.layers_desc[layer_name].copy()
+          class_name_ = layer_desc_.pop("class")
+          layer_class_ = get_layer_class(class_name_)
+          layer_class_.transform_config_dict(layer_desc_, network=net, get_layer=opt_get_layer)
+          # noinspection PyProtectedMember
+          layer_desc_ = net._create_layer_layer_desc(name=layer_name, layer_desc=layer_desc_)
+          output = layer_class_.get_out_data_from_opts(**layer_desc_).copy()
         output.beam = None
         output.placeholder = tf.zeros(
           [d or 1 for d in output.batch_shape], dtype=output.dtype, name="%s_dummy" % output.name)
+        if not output.size_placeholder:
+          output.size_placeholder = {}
+        for i, dim in enumerate(output.shape):
+          if dim is None and i not in output.size_placeholder:
+            output.size_placeholder[i] = tf.ones([1], dtype=tf.int32, name="dummy_reuse_params_size")
         output.sanity_check()
-        return InternalLayer(name=layer_name, network=self.network, output=output)
+        print("ReuseParams: creating dummy input %r with %r" % (layer_name, output), file=log.v4)
+        return InternalLayer(name=layer_name, network=network, output=output)
 
-      layer_desc = dep_loop_exception.net_dict[self.layer_name].copy()
+      layer_desc = network.layers_desc[layer_name].copy()
       class_name = layer_desc.pop("class")
       layer_class = get_layer_class(class_name)
-      layer_class.transform_config_dict(layer_desc, network=self.network, get_layer=get_dummy_input_layer)
-      # noinspection PyProtectedMember
-      return self.network._create_layer(name=self.layer_name, layer_class=layer_class, **layer_desc)
+      layer_class.transform_config_dict(layer_desc, network=network, get_layer=get_dummy_input_layer)
+      with reuse_name_scope(network.get_absolute_name_scope_prefix()[:-1], absolute=True):
+        # noinspection PyProtectedMember
+        return network._create_layer(
+          name=layer_name, layer_class=layer_class, **layer_desc)
 
   # noinspection PyShadowingBuiltins
   def __init__(self, reuse_layer=None, map=None, custom=None, auto_create_missing=False):
@@ -1536,6 +1570,9 @@ class ReuseParams:
     self.param_map = map
     self.custom_func = custom
     self.auto_create_missing = auto_create_missing
+
+  def __repr__(self):
+    return "<%s reuse_layer %r, map %r>" % (self.__class__.__name__, self._reuse_layer, self.param_map)
 
   @property
   def reuse_layer(self):
@@ -1756,7 +1793,7 @@ class SearchChoices(object):
 
   def get_beam_info(self):
     """
-    :rtype: TFUtil.SearchBeam|None
+    :rtype: returnn.tf.util.data.SearchBeam|None
     """
     if self.owner.output.beam is None:
       assert self.beam_size == 1
@@ -1870,7 +1907,7 @@ class Loss(object):
                use_normalized_loss=False, custom_norm_factor=None,
                scale=1.0):
     """
-    :param TFNetwork.TFNetwork base_network:
+    :param returnn.tf.network.TFNetwork base_network:
     :param bool use_flatten_frames: will use :func:`TFUtil.flatten_with_seq_len_mask`
     :param bool use_normalized_loss: the loss used in optimization will be normalized
     :param float|function|None custom_norm_factor:
@@ -1969,7 +2006,7 @@ class Loss(object):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace, the loss_opts
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
 
     Will modify `d` such that it becomes the kwargs for `self.__init__()`.

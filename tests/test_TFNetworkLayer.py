@@ -2,41 +2,23 @@
 # start: nosetests $this_file --nologcapture
 from __future__ import division
 
+import _setup_test_env  # noqa
 import logging
-logging.getLogger('tensorflow').disabled = True
-
 import os
-# Get us some further useful debug messages (in some cases, e.g. CUDA).
-# For example: https://github.com/tensorflow/tensorflow/issues/24496
-# os.environ["CUDNN_LOGINFO_DBG"] = "1"
-# os.environ["CUDNN_LOGDEST_DBG"] = "stdout"
-# The following might fix (workaround): Could not create cudnn handle: CUDNN_STATUS_INTERNAL_ERROR
-# (https://github.com/tensorflow/tensorflow/issues/24496).
-# os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
-
 import tensorflow as tf
-print("TF version:", tf.__version__)
-
 import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from nose.tools import assert_equal, assert_is_instance
 import contextlib
 import unittest
 import numpy.testing
 from pprint import pprint
 from returnn.util import better_exchook
-better_exchook.replace_traceback_format_tb()
-
 from returnn.config import Config
 from returnn.tf.network import *
 from returnn.tf.layers.basic import *
 from returnn.log import log
 import returnn.tf.compat as tf_compat
 import returnn.tf.util.basic as tf_util
-tf_util.debug_register_better_repr()
-
-log.initialize(verbosity=[5])
 
 print("TF version:", tf.__version__)
 print("Numpy version:", numpy.__version__)
@@ -54,7 +36,7 @@ def make_scope():
 
 def make_feed_dict(data_list, same_time=False, n_batch=3, n_time=7):
   """
-  :param list[TFUtil.Data]|ExternData data_list:
+  :param list[returnn.tf.util.data.Data]|ExternData data_list:
   :param bool same_time:
   :param int n_batch:
   :param int n_time:
@@ -2172,6 +2154,41 @@ def test_ResizeLayer_fill_dropout():
       assert_equal([s for s in out[i] if s != fill_value], src_seqs[i])
 
 
+def test_PostfixInTimeLayer():
+  with make_scope() as session:
+    import numpy as np
+    net = TFNetwork(extern_data=ExternData())
+    src = InternalLayer(name="src", network=net, out_type={"dim": 2, "dtype": "int32"})
+    src_seqs = np.array([[[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]], [[6, 6], [7, 7], [8, 8], [0, 0], [0, 0]]])
+    src_seq_lens = [5, 3]
+    src.output.placeholder = tf.constant(src_seqs, dtype=tf.int32)
+    src.output.size_placeholder = {0: tf.constant(src_seq_lens, dtype=tf.int32)}
+
+    static_postfix = -7
+    layer_postfix = InternalLayer(
+      name="postfix", network=net, out_type={"dim": 2, "time_dim_axis": None, "dtype": "int32"})
+    layer_postfix.output.placeholder = tf.constant([[-7, -8], [-9, -10]], dtype=tf.int32)
+
+    for postfix in [static_postfix, layer_postfix]:
+      for repeat in (1, 3):
+        layer = PostfixInTimeLayer(
+          name="postfix_in_time", network=net,
+          sources=[src], postfix=postfix, repeat=repeat,
+          output=PostfixInTimeLayer.get_out_data_from_opts(
+            name="postfix_in_time", network=net, sources=[src], postfix=postfix, repeat=repeat))
+        out, seq_lens = session.run([layer.output.placeholder, layer.output.size_placeholder[0]])
+        print(out)
+        print(seq_lens)
+        assert isinstance(out, numpy.ndarray)
+        assert isinstance(seq_lens, numpy.ndarray)
+        assert out.shape == (2, 5 + repeat, 2)
+        assert all(new_len == src_len + repeat for new_len, src_len in zip(seq_lens, src_seq_lens))
+        assert out[0, src_seq_lens[0] - 1, 0] == src_seqs[0, src_seq_lens[0] - 1, 0]
+        assert out[1, src_seq_lens[1] - 1, 0] == src_seqs[1, src_seq_lens[1] - 1, 0]
+        assert out[0, src_seq_lens[0], 0] == -7
+        assert out[0, src_seq_lens[0] + repeat - 1, 0] == -7
+
+
 def test_DotLayer():
   with make_scope() as session:
     B = 2
@@ -2305,6 +2322,200 @@ def test_ReuseParams_rec():
     feed = make_feed_dict(10)
     fwd_out, fwd_out_copy = session.run([network.layers["rec_fwd"].output.placeholder, network.layers["rec_fwd_copy"].output.placeholder], feed_dict=feed)
     numpy.testing.assert_array_equal(fwd_out, fwd_out_copy)
+
+
+def test_ReuseParams_dep_loop():
+  num_inputs = 10
+  num_outputs = 15
+  config = Config()
+  config.update({
+    "num_inputs": num_inputs,
+    "num_outputs": {"data": [num_inputs, 2], "classes": [num_outputs, 1]},  # dense output
+    "network": {
+      "layer1": {"class": "rec", "from": "data", "n_out": 10, "unit": {
+        "sub1": {
+          "class": "linear", "from": ["data:source", "prev:output"], "activation": "relu", "n_out": 10
+        },
+        "sub2": {
+          "class": "linear", "from": "sub1", "activation": "relu", "n_out": 10,
+          "reuse_params": "base:layer2",  # circular dependency!
+        },
+        "output": {
+          "class": "linear", "from": ["sub1", "sub2", "prev:output"], "activation": "relu", "n_out": 10
+        }
+      }},
+      "layer2": {"class": "linear", "from": "layer1", "activation": "relu", "n_out": 10},
+      "out": {"class": "softmax", "from": "layer2", "loss": "ce", "n_out": num_outputs},
+    },
+    "adam": True,
+    "target": "classes",
+    "debug_print_layer_output_template": True,
+  })
+  print("Creating network...")
+  network = TFNetwork(config=config, train_flag=True)
+  network.construct_from_dict(config.typed_dict["network"])
+
+  params = network.get_params_list()
+  pprint(params)
+  l1 = network.get_layer("layer1")
+  from returnn.tf.layers.rec import RecLayer, _SubnetworkRecCell
+  assert isinstance(l1, RecLayer)
+  cell = l1.cell
+  assert isinstance(cell, _SubnetworkRecCell)
+  l1 = cell.net.layers["sub2"]
+  assert isinstance(l1, LinearLayer)
+  assert tf_util.has_control_flow_context(l1.output.placeholder)  # this should be in the loop
+  l2 = network.get_layer("layer2")
+  assert not tf_util.has_control_flow_context(l2.output.placeholder)  # outside the loop
+  assert isinstance(l2, LinearLayer)
+  assert set(l1.params.keys()) == set(l2.params.keys()) == {"W", "b"}
+  assert l1.params["W"] is l2.params["W"]
+  assert l1.params["b"] is l2.params["b"]
+
+  def make_feed_dict(seq_len=10):
+    random = numpy.random.RandomState(seed=1)
+    return {
+      network.extern_data.data["data"].placeholder: random.uniform(-1, 1, (1, seq_len, num_inputs)),
+      network.extern_data.data["data"].size_placeholder[0]: numpy.array([seq_len]),
+      network.extern_data.data["classes"].placeholder: random.randint(low=0, high=num_outputs, size=(1, seq_len)),
+      network.extern_data.data["classes"].size_placeholder[0]: numpy.array([seq_len]),
+    }
+
+  with tf_compat.v1.Session() as session:
+    network.initialize_params(session=session)
+    feed = make_feed_dict(10)
+    # Not really needed (for testing reuse_params), but just test anyway.
+    session.run(network.get_default_output_layer().output.placeholder, feed_dict=feed)
+
+
+def test_ReuseParams_dep_loop_2():
+  num_inputs = 10
+  num_outputs = 15
+  config = Config()
+  config.update({
+    "num_inputs": num_inputs,
+    "num_outputs": {"data": [num_inputs, 2], "classes": [num_outputs, 1]},  # dense output
+    "network": {
+      "layer1": {"class": "rec", "from": "data", "n_out": 10, "unit": {
+        "sub1": {
+          "class": "linear", "from": ["data:source", "prev:output"], "activation": "relu", "n_out": 10
+        },
+        "sub2": {
+          "class": "linear", "from": "sub1", "activation": "relu", "n_out": 10,
+          "reuse_params": "base:layer2",  # circular dependency!
+          "is_output_layer": True,
+        },
+        "output": {
+          "class": "linear", "from": ["sub1", "sub2", "prev:output"], "activation": "relu", "n_out": 10
+        }
+      }},
+      "layer2": {"class": "linear", "from": "layer1/sub2", "activation": "relu", "n_out": 10},
+      "out": {"class": "softmax", "from": "layer2", "loss": "ce", "n_out": num_outputs},
+    },
+    "adam": True,
+    "target": "classes",
+    "debug_print_layer_output_template": True,
+  })
+  print("Creating network...")
+  network = TFNetwork(config=config, train_flag=True)
+  network.construct_from_dict(config.typed_dict["network"])
+
+  params = network.get_params_list()
+  pprint(params)
+  l1 = network.get_layer("layer1")
+  from returnn.tf.layers.rec import RecLayer, _SubnetworkRecCell
+  assert isinstance(l1, RecLayer)
+  cell = l1.cell
+  assert isinstance(cell, _SubnetworkRecCell)
+  l1 = cell.net.layers["sub2"]
+  assert isinstance(l1, LinearLayer)
+  assert tf_util.has_control_flow_context(l1.output.placeholder)  # this should be in the loop
+  l2 = network.get_layer("layer2")
+  assert not tf_util.has_control_flow_context(l2.output.placeholder)  # outside the loop
+  assert isinstance(l2, LinearLayer)
+  assert set(l1.params.keys()) == set(l2.params.keys()) == {"W", "b"}
+  assert l1.params["W"] is l2.params["W"]
+  assert l1.params["b"] is l2.params["b"]
+
+  def make_feed_dict(seq_len=10):
+    random = numpy.random.RandomState(seed=1)
+    return {
+      network.extern_data.data["data"].placeholder: random.uniform(-1, 1, (1, seq_len, num_inputs)),
+      network.extern_data.data["data"].size_placeholder[0]: numpy.array([seq_len]),
+      network.extern_data.data["classes"].placeholder: random.randint(low=0, high=num_outputs, size=(1, seq_len)),
+      network.extern_data.data["classes"].size_placeholder[0]: numpy.array([seq_len]),
+    }
+
+  with tf_compat.v1.Session() as session:
+    network.initialize_params(session=session)
+    feed = make_feed_dict(10)
+    # Not really needed (for testing reuse_params), but just test anyway.
+    session.run(network.get_default_output_layer().output.placeholder, feed_dict=feed)
+
+
+def test_ReuseParams_dep_loop_3():
+  num_inputs = 10
+  num_outputs = 15
+  config = Config()
+  config.update({
+    "num_inputs": num_inputs,
+    "num_outputs": {"data": [num_inputs, 2], "classes": [num_outputs, 1]},  # dense output
+    "network": {
+      "layer1": {"class": "rec", "from": "data", "n_out": 10, "unit": {
+        "sub1": {
+          "class": "linear", "from": ["data:source", "prev:output"], "activation": "relu", "n_out": 10,
+          "is_output_layer": True,
+        },
+        "sub2": {
+          "class": "linear", "from": "sub1", "activation": "relu", "n_out": 10,
+          "reuse_params": "base:layer2",  # circular dependency!
+        },
+        "output": {
+          "class": "linear", "from": ["sub1", "sub2", "prev:output"], "activation": "relu", "n_out": 10
+        }
+      }},
+      "layer2": {"class": "linear", "from": "layer1/sub1", "activation": "relu", "n_out": 10},
+      "out": {"class": "softmax", "from": "layer2", "loss": "ce", "n_out": num_outputs},
+    },
+    "adam": True,
+    "target": "classes",
+    "debug_print_layer_output_template": True,
+  })
+  print("Creating network...")
+  network = TFNetwork(config=config, train_flag=True)
+  network.construct_from_dict(config.typed_dict["network"])
+
+  params = network.get_params_list()
+  pprint(params)
+  l1 = network.get_layer("layer1")
+  from returnn.tf.layers.rec import RecLayer, _SubnetworkRecCell
+  assert isinstance(l1, RecLayer)
+  cell = l1.cell
+  assert isinstance(cell, _SubnetworkRecCell)
+  l1 = cell.net.layers["sub2"]
+  assert isinstance(l1, LinearLayer)
+  assert tf_util.has_control_flow_context(l1.output.placeholder)  # this should be in the loop
+  l2 = network.get_layer("layer2")
+  assert not tf_util.has_control_flow_context(l2.output.placeholder)  # outside the loop
+  assert isinstance(l2, LinearLayer)
+  assert set(l1.params.keys()) == set(l2.params.keys()) == {"W", "b"}
+  assert l1.params["W"] is l2.params["W"]
+  assert l1.params["b"] is l2.params["b"]
+
+  def make_feed_dict(seq_len=10):
+    random = numpy.random.RandomState(seed=1)
+    return {
+      network.extern_data.data["data"].placeholder: random.uniform(-1, 1, (1, seq_len, num_inputs)),
+      network.extern_data.data["data"].size_placeholder[0]: numpy.array([seq_len]),
+      network.extern_data.data["classes"].placeholder: random.randint(low=0, high=num_outputs, size=(1, seq_len)),
+      network.extern_data.data["classes"].size_placeholder[0]: numpy.array([seq_len]),
+    }
+
+  with tf_compat.v1.Session() as session:
+    network.initialize_params(session=session)
+    feed = make_feed_dict(10)
+    # Not really needed (for testing reuse_params), but just test anyway.
+    session.run(network.get_default_output_layer().output.placeholder, feed_dict=feed)
 
 
 def test_LossAsIs_custom_dim():

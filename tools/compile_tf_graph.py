@@ -11,17 +11,14 @@ from __future__ import print_function
 import typing
 import os
 import sys
+import argparse
 import tensorflow as tf
 from tensorflow.python.framework import graph_io
 
-my_dir = os.path.dirname(os.path.abspath(__file__))
-returnn_dir = os.path.dirname(my_dir)
-sys.path.insert(0, returnn_dir)
-
+import _setup_returnn_env  # noqa
 import returnn.__main__ as rnn
 from returnn.log import log
 from returnn.config import Config
-import argparse
 import returnn.util.basic as util
 from returnn.util.basic import NotSpecified
 import returnn.tf.compat as tf_compat
@@ -69,7 +66,7 @@ def create_graph(train_flag, eval_flag, search_flag, net_dict):
   :param bool search_flag:
   :param dict[str,dict[str]] net_dict:
   :return: adds to the current graph, and then returns the network
-  :rtype: TFNetwork.TFNetwork
+  :rtype: returnn.tf.network.TFNetwork
   """
   print("Loading network, train flag %s, eval flag %s, search flag %s" % (train_flag, eval_flag, search_flag))
   from returnn.tf.engine import Engine
@@ -527,7 +524,7 @@ class ChoiceStateVarLayer(LayerBase):
   def transform_config_dict(cls, d, network, get_layer):
     """
     :param dict[str] d: will modify inplace
-    :param TFNetwork.TFNetwork network:
+    :param returnn.tf.network.TFNetwork network:
     :param ((str) -> LayerBase) get_layer: function to get or construct another layer
     """
     assert d.get("from", NotSpecified) is not NotSpecified, "specify 'from' explicitly for choice layer"

@@ -12,10 +12,7 @@ import sys
 import time
 import typing
 
-my_dir = os.path.dirname(os.path.abspath(__file__))
-returnn_dir = os.path.dirname(my_dir)
-sys.path.append(returnn_dir)
-
+import _setup_returnn_env  # noqa
 from returnn import __main__ as rnn
 from returnn.log import log
 import argparse
@@ -99,7 +96,10 @@ def dump_dataset(dataset, options):
   elif options.type == "interactive":
     print("Interactive debug shell.", file=log.v3)
   elif options.type == "null":
-    print("No dump.")
+    if options.dump_stats:
+      print("No dump (except stats).")
+    else:
+      print("No dump.")
   else:
     raise Exception("unknown dump option type %r" % options.type)
 
@@ -152,7 +152,8 @@ def dump_dataset(dataset, options):
       for target in dataset.get_target_list():
         targets = dataset.get_targets(target, seq_idx)
         if options.type == "numpy":
-          numpy.savetxt("%s%i.targets.%s%s" % (options.dump_prefix, seq_idx, target, options.dump_postfix), targets, fmt='%i')
+          numpy.savetxt(
+            "%s%i.targets.%s%s" % (options.dump_prefix, seq_idx, target, options.dump_postfix), targets, fmt='%i')
         elif options.type == "stdout":
           extra = ""
           if target in dataset.labels and len(dataset.labels[target]) > 1:
@@ -231,8 +232,10 @@ def init(config_str, config_dataset, verbosity):
   rnn.init_faulthandler()
   rnn.init_config_json_network()
   # We use 'train' from the config.
-  config.set("dev", None)
-  config.set("eval", None)
+  if config.has("dev"):
+    config.set("dev", None)
+  if config.has("eval"):
+    config.set("eval", None)
   rnn.init_data()
   rnn.print_task_properties()
 

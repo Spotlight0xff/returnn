@@ -4,15 +4,8 @@
 
 from __future__ import print_function
 
-import logging
-logging.getLogger('tensorflow').disabled = True
-
+import _setup_test_env  # noqa
 import tensorflow as tf
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import returnn.tf.compat as tf_compat
 from returnn.tf.engine import *
 import returnn.tf.util.basic
@@ -27,19 +20,6 @@ import contextlib
 from returnn.util import better_exchook
 from returnn.log import log
 import returnn.util.debug
-
-log.initialize(verbosity=[5])
-returnn.tf.util.basic.debug_register_better_repr()
-better_exchook.replace_traceback_format_tb()
-returnn.util.debug.install_lib_sig_segfault()
-
-try:
-  import faulthandler
-  # Enable after libSigSegfault, so that we have both,
-  # because faulthandler will also call the original sig handler.
-  faulthandler.enable()
-except ImportError:
-  print("no faulthandler")
 
 
 print("TF version:", tf.__version__)
@@ -1145,10 +1125,7 @@ def test_attention_no_encoder_dependency():
           "att_energy_tanh": {'class': 'activation', 'from': ['att_energy_in'], 'activation': 'tanh'},
           "att_energy": {'class': 'linear', 'from': ['att_energy_tanh'], 'n_out': 1, 'activation': None,
                          'out_type': {
-                                      'shape': (None, 1),
-                                      'time_dim_axis': 1,
-                                      'feature_dim_axis': 2,
-                                      'same_dim_tags_as': {'T': enc_time}},
+                           'same_dim_tags_as': {'T': enc_time}},
                          },
           "att_weights": {'class': 'softmax_over_spatial', 'from': ['att_energy']},
           # feedback
@@ -1184,6 +1161,164 @@ def test_attention_no_encoder_dependency():
   assert "decision" in engine.network.losses_dict
 
   engine.finalize()
+
+
+def check_attention_variant(recurrent_unit_dict):
+  from returnn.datasets.generating import DummyDataset
+  seq_len = 5
+  n_data_dim = 2
+  n_classes_dim = 7
+  train_data = DummyDataset(input_dim=n_data_dim, output_dim=n_classes_dim, num_seqs=2, seq_len=seq_len)
+  train_data.init_seq_order(epoch=1)
+  dev_data = DummyDataset(input_dim=n_data_dim, output_dim=n_classes_dim, num_seqs=2, seq_len=seq_len)
+  dev_data.init_seq_order(epoch=1)
+
+  config = Config()
+  config.update({
+    "model": "%s/model" % _get_tmp_dir(),
+    "batch_size": 5000,
+    "max_seqs": 2,
+    "extern_data": {'data': {'dim': n_data_dim},
+                    'classes': {'dim': n_classes_dim, 'sparse': True}},
+    "num_epochs": 1,
+    "network": {
+      "encoder": {"class": "linear", "activation": "tanh", "n_out": 5},
+      "enc_transformed": {'class': 'linear', 'from': ['encoder'], 'n_out': 6, 'activation': None},
+      "output": {
+        "class": "rec",
+        "from": [],
+        "target": "classes", "max_seq_len": 5,
+        "unit": recurrent_unit_dict,
+      },
+      "decision": {"class": "decide", "from": ["output"], "loss": "edit_distance"}
+    },
+    "debug_print_layer_output_template": True,
+  })
+  _cleanup_old_models(config)
+  engine = Engine(config=config)
+  print("Train...")
+  engine.init_train_from_config(config=config, train_data=train_data, dev_data=dev_data)
+  engine.train()
+
+  print("Search...")
+  engine.use_search_flag = True
+  engine.use_dynamic_train_flag = False
+  engine.init_network_from_config(config)
+  engine.search(dataset=dev_data)
+  print("error keys:")
+  pprint(engine.network.losses_dict)
+  assert engine.network.total_objective is not None
+  assert "decision" in engine.network.losses_dict
+
+  engine.finalize()
+
+
+def test_attention_convolutional_feedback_variant1():
+  recurrent_unit_dict = {
+    'output': {'class': 'choice', 'target': 'classes', 'beam_size': 4, 'from': ["output_prob"]},
+    "end": {"class": "compare", "from": ["output"], "value": 0},
+    'orth_embed': {'class': 'linear', 'activation': None, 'from': ['output'], "n_out": 7},
+    "s": {"class": "rnn_cell", "unit": "LSTMBlock", "from": ["prev:c", "prev:orth_embed"], "n_out": 7},
+    "output_prob": {"class": "softmax", "from": ["prev:s", "c"], "target": "classes", "loss": "ce"},
+    # basic attention
+    "s_transformed": {'class': 'linear', 'from': ['s'], 'n_out': 6, 'activation': None},
+    "att_energy_tanh": {'class': 'activation', 'from': ['att_energy_in'], 'activation': 'tanh'},
+    "att_energy": {'class': 'linear', 'from': ['att_energy_tanh'], 'n_out': 1, 'activation': None,
+                   },
+    "att_weights": {'class': 'softmax_over_spatial', 'from': ['att_energy']},
+    'accum_att_weights': {'class': 'eval',
+                          'eval': 'source(0) + source(1)',
+                          'from': ['prev:accum_att_weights', 'att_weights'],
+                          'is_output_layer': True,
+                          'out_type': {'dim': 1, 'shape': (None, 1)}},
+    'feedback_pad_left': {'axes': 's:0',
+                          'class': 'pad',
+                          'from': ['prev:accum_att_weights'],
+                          'mode': 'constant',
+                          'padding': ((2, 0),),
+                          'value': 1},
+    'feedback_pad_right': {'axes': 's:0',
+                           'class': 'pad',
+                           'from': ['feedback_pad_left'],
+                           'mode': 'constant',
+                           'padding': ((0, 2),),
+                           'value': 0},
+    "convolved_att": {'class': 'conv', 'from': ['feedback_pad_right'], 'filter_size': (5,),
+                      'n_out': 4, 'padding': 'valid'},
+    "location_feedback": {'class': 'linear', 'from': ['convolved_att'], 'n_out': 6, 'activation': None},
+    "att_energy_in": {'class': 'combine', 'kind': 'add', 'from': [
+      'base:enc_transformed', 'location_feedback', 's_transformed']},
+    "c": {"class": "generic_attention", "base": "base:encoder", "weights": "att_weights"},
+  }
+
+  check_attention_variant(recurrent_unit_dict)
+
+
+def test_attention_convolutional_feedback_variant2():
+  recurrent_unit_dict = {
+    'output': {'class': 'choice', 'target': 'classes', 'beam_size': 4, 'from': ["output_prob"]},
+    "end": {"class": "compare", "from": ["output"], "value": 0},
+    'orth_embed': {'class': 'linear', 'activation': None, 'from': ['output'], "n_out": 7},
+    "s": {"class": "rnn_cell", "unit": "LSTMBlock", "from": ["prev:c", "prev:orth_embed"], "n_out": 7},
+    "output_prob": {"class": "softmax", "from": ["prev:s", "c"], "target": "classes", "loss": "ce"},
+    # basic attention
+    "s_transformed": {'class': 'linear', 'from': ['s'], 'n_out': 6, 'activation': None},
+    "att_energy_tanh": {'class': 'activation', 'from': ['att_energy_in'], 'activation': 'tanh'},
+    "att_energy": {'class': 'linear', 'from': ['att_energy_tanh'], 'n_out': 1, 'activation': None,
+                   },
+    "att_weights": {'class': 'softmax_over_spatial', 'from': ['att_energy']},
+    # feedback
+    "accum_att_weights": {'class': 'combine', 'kind': 'add',
+                          'from': ['att_weights', 'prev:accum_att_weights'],
+                          },
+    "convolved_att": {'class': 'conv', 'from': ['prev:accum_att_weights'], 'filter_size': (5,),
+                      'n_out': 4, 'padding': 'same'},
+    "location_feedback": {'class': 'linear', 'from': ['convolved_att'], 'n_out': 6, 'activation': None},
+    "att_energy_in": {'class': 'combine', 'kind': 'add', 'from': [
+      'base:enc_transformed', 'location_feedback', 's_transformed']},
+    "c": {"class": "generic_attention", "base": "base:encoder", "weights": "att_weights"},
+  }
+
+  check_attention_variant(recurrent_unit_dict)
+
+
+def test_attention_convolutional_feedback_variant3():
+  recurrent_unit_dict = {
+    'output': {'class': 'choice', 'target': 'classes', 'beam_size': 4, 'from': ["output_prob"]},
+    "end": {"class": "compare", "from": ["output"], "value": 0},
+    'orth_embed': {'class': 'linear', 'activation': None, 'from': ['output'], "n_out": 7},
+    "s": {"class": "rnn_cell", "unit": "LSTMBlock", "from": ["prev:c", "prev:orth_embed"], "n_out": 7},
+    "output_prob": {"class": "softmax", "from": ["prev:s", "c"], "target": "classes", "loss": "ce"},
+    # basic attention
+    "s_transformed": {'class': 'linear', 'from': ['s'], 'n_out': 6, 'activation': None},
+    "att_energy_tanh": {'class': 'activation', 'from': ['att_energy_in'], 'activation': 'tanh'},
+    "att_energy": {'class': 'linear', 'from': ['att_energy_tanh'], 'n_out': 1, 'activation': None,
+                   },
+    "att_weights": {'class': 'softmax_over_spatial', 'from': ['att_energy']},
+    "accum_att_weights": {'class': 'combine', 'kind': 'add',
+                          'from': ['att_weights', 'prev:accum_att_weights'],
+                          },
+    'feedback_pad_left': {'axes': 's:0',
+                          'class': 'pad',
+                          'from': ['prev:accum_att_weights'],
+                          'mode': 'constant',
+                          'padding': ((2, 0),),
+                          'value': 1},
+    'feedback_pad_right': {'axes': 's:0',
+                           'class': 'pad',
+                           'from': ['feedback_pad_left'],
+                           'mode': 'constant',
+                           'padding': ((0, 2),),
+                           'value': 0},
+    "convolved_att": {'class': 'conv', 'from': ['feedback_pad_right'], 'filter_size': (5,),
+                      'n_out': 4, 'padding': 'valid'},
+    "location_feedback": {'class': 'linear', 'from': ['convolved_att'], 'n_out': 6, 'activation': None},
+    "att_energy_in": {'class': 'combine', 'kind': 'add', 'from': [
+      'base:enc_transformed', 'location_feedback', 's_transformed']},
+    "c": {"class": "generic_attention", "base": "base:encoder", "weights": "att_weights"},
+  }
+
+  check_attention_variant(recurrent_unit_dict)
 
 
 def test_attention_search_in_train_then_search():

@@ -1,10 +1,7 @@
 
 from __future__ import print_function
-import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import _setup_test_env  # noqa
 from subprocess import Popen, PIPE, STDOUT, CalledProcessError
 import re
 import os
@@ -13,7 +10,6 @@ from glob import glob
 from nose.tools import assert_less, assert_in
 from returnn.util import better_exchook
 from returnn.util.basic import which_pip
-better_exchook.replace_traceback_format_tb()
 
 
 py = sys.executable
@@ -34,7 +30,6 @@ def build_env():
   theano_flags["mode"] = "FAST_RUN"
   env_update = os.environ.copy()
   env_update["THEANO_FLAGS"] = ",".join(["%s=%s" % (key, value) for (key, value) in theano_flags.items()])
-  #print >>sys.stderr, theano_flags
   return env_update
 
 
@@ -92,12 +87,12 @@ class TestDemos(object):
     assert os.path.exists("rnn.py")
 
   def test_demo_task12ax(self):
-    fer = run_config_get_fer("demos/demo-task12ax.config")
+    fer = run_config_get_fer("demos/demo-theano-task12ax.config")
     assert_less(fer, 0.01)
 
   def test_demo_iter_dataset_task12ax(self):
-    cleanup_tmp_models("demos/demo-task12ax.config")
-    out = run(py, "demos/demo-iter-dataset.py", "demos/demo-task12ax.config")
+    cleanup_tmp_models("demos/demo-theano-task12ax.config")
+    out = run(py, "demos/demo-iter-dataset.py", "demos/demo-theano-task12ax.config")
     assert_in("Epoch 5.", out.splitlines())
 
   def test_demo_returnn_as_framework(self):

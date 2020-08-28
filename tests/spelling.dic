@@ -1,15 +1,19 @@
 accum
 adadelta
 adagrad
+argparse
 attribs
 audioread
+automata
 backprop
+bahdanau
 bilinear
 blocksparse
 bptt
 childs
 compat
 crnn
+cuda
 blstm
 darc
 deps
@@ -19,6 +23,7 @@ dtype
 enwik
 excepthook
 exchook
+ffmpeg
 filterbank
 frac
 gelu
@@ -33,6 +38,7 @@ kingma
 horovod
 librosa
 logits
+luong
 lstm
 maxout
 mdlstm
@@ -43,6 +49,7 @@ nativelstm
 ndarray
 ndim
 newbob
+nopep
 optim
 orth
 passthrough
@@ -70,7 +77,9 @@ timit
 tuske
 uint
 vanhoucke
+viterbi
 voigtlaender
 warprnnt
+welch
 zeyer
 zoneout

@@ -13,9 +13,11 @@ See here:
 import os
 import sys
 import re
+import time
 import shutil
 import subprocess
 import tempfile
+import typing
 from glob import glob
 import argparse
 from xml.dom import minidom
@@ -27,7 +29,69 @@ sys.path.insert(0, root_dir)
 os.chdir(root_dir)
 
 from returnn.util import better_exchook  # noqa
-from returnn.util.basic import pip_install, which_pip, pip_check_is_installed  # noqa
+from returnn.util.basic import pip_install, which_pip, pip_check_is_installed, hms  # noqa
+
+travis_env = os.environ.get("TRAVIS") == "true"
+github_env = os.environ.get("GITHUB_ACTIONS") == "true"
+
+gray_color = "black"  # black is usually gray
+if github_env:
+  gray_color = "white"  # black is black, on black background. so just use white
+
+
+class _StdoutTextFold:
+  def __init__(self, name):
+    """
+    :param str name:
+    """
+    self.name = name
+    self.start_time = time.time()
+
+    if github_env:
+      # https://github.community/t/has-github-action-somthing-like-travis-fold/16841
+      if not folds:  # nested folds not supported, https://github.com/actions/toolkit/issues/112
+        print("::group::%s" % name)
+
+    if travis_env:
+      # travis_fold: https://github.com/travis-ci/travis-ci/issues/1065
+      print("travis_fold:start:%s" % name)
+
+    sys.stdout.flush()
+
+  def finish(self):
+    """
+    End fold.
+    """
+    elapsed_time = time.time() - self.start_time
+    print("%s: Elapsed time: %s" % (self.name, hms(elapsed_time)))
+
+    if travis_env:
+      print("travis_fold:end:%s" % folds[-1])
+
+    if github_env:
+      if len(folds) == 1:
+        print("::endgroup::")
+
+    sys.stdout.flush()
+
+
+folds = []  # type: typing.List[_StdoutTextFold]
+
+
+def fold_start(name):
+  """
+  :param str name:
+  """
+  folds.append(_StdoutTextFold(name))
+
+
+def fold_end():
+  """
+  Ends the fold.
+  """
+  assert folds
+  folds[-1].finish()
+  folds.pop(-1)
 
 
 def check_pycharm_dir(pycharm_dir):
@@ -43,13 +107,33 @@ def install_pycharm():
   :return: pycharm dir
   :rtype: str
   """
-  # travis_fold: https://github.com/travis-ci/travis-ci/issues/1065
+  fold_start("script.install")
   print("travis_fold:start:script.install")
-  pycharm_dir = "%s/pycharm" % tempfile.mkdtemp()
+  install_dir = tempfile.mkdtemp()
+  pycharm_dir = "%s/pycharm" % install_dir
   print("Install PyCharm into:", pycharm_dir)
-  subprocess.check_call([my_dir + "/install_pycharm.sh"], cwd=os.path.dirname(pycharm_dir), stderr=subprocess.STDOUT)
+  sys.stdout.flush()
+
+  pycharm_version = (2020, 2)
+  name = "pycharm-community-%i.%i" % pycharm_version
+  fn = "%s.tar.gz" % name
+
+  subprocess.check_call(
+    ["wget", "--progress=dot:mega",
+     "-c", "https://download.jetbrains.com/python/%s" % fn],
+    cwd=install_dir,
+    stderr=subprocess.STDOUT)
+  tar_out = subprocess.check_output(
+    ["tar", "-xzvf", fn],
+    cwd=install_dir,
+    stderr=subprocess.STDOUT)
+  print((b"\n".join(tar_out.splitlines()[-10:])).decode("utf8"))
+  assert os.path.isdir("%s/%s" % (install_dir, name))
+  os.remove("%s/%s" % (install_dir, fn))
+  os.rename("%s/%s" % (install_dir, name), pycharm_dir)
   check_pycharm_dir(pycharm_dir)
-  print("travis_fold:end:script.install")
+
+  fold_end()
   return pycharm_dir
 
 
@@ -96,7 +180,7 @@ def create_stub_dir(pycharm_dir, stub_dir, pycharm_major_version):
   :param str stub_dir:
   :param int pycharm_major_version:
   """
-  print("travis_fold:start:script.create_python_stubs")
+  fold_start("script.create_python_stubs")
   print("Generating Python stubs via helpers/generator3.py...")
   if pycharm_major_version >= 2020:
     generator_path = "%s/plugins/python-ce/helpers/generator3/__main__.py" % pycharm_dir
@@ -118,6 +202,7 @@ def create_stub_dir(pycharm_dir, stub_dir, pycharm_major_version):
     assert os.path.exists(generator_path)
     subprocess.check_call([sys.executable, generator_path, "-d", stub_dir, "-b"])
     print("Collecting further native modules...")
+    sys.stdout.flush()
     mod_names = []
     for line in subprocess.check_output([
           sys.executable, generator_path, "-L"]).decode("utf8").splitlines()[1:]:
@@ -130,9 +215,10 @@ def create_stub_dir(pycharm_dir, stub_dir, pycharm_major_version):
         mod_names.append(mod_name)
     for mod_name in mod_names:
       print("Generate for %r." % mod_name)
+      sys.stdout.flush()
       # Ignore errors here.
       subprocess.call([sys.executable, generator_path, "-d", stub_dir, mod_name])
-  print("travis_fold:end:script.create_python_stubs")
+  fold_end()
 
 
 _use_stub_zip = False
@@ -150,11 +236,11 @@ def setup_pycharm_python_interpreter(pycharm_dir):
 
   :param str pycharm_dir:
   """
-  print("travis_fold:start:script.setup_pycharm_python_interpreter")
+  fold_start("script.setup_pycharm_python_interpreter")
   print("Setup PyCharm Python interpreter... (jdk.table.xml)")
   print("Current Python:", sys.executable, sys.version, sys.version_info)
   name = "Python 3 (.../bin/python3)"  # used in our PyCharm.idea. this should match.
-  pycharm_version_str = get_version_str_from_pycharm(pycharm_dir)  # should match in install_pycharm.sh
+  pycharm_version_str = get_version_str_from_pycharm(pycharm_dir)
   pycharm_version, pycharm_version_name = parse_pycharm_version(pycharm_version_str)
   if sys.platform == "darwin":
     pycharm_config_dir = os.path.expanduser("~/Library/Preferences/PyCharm%s" % pycharm_version_str)
@@ -188,22 +274,29 @@ def setup_pycharm_python_interpreter(pycharm_dir):
         cwd=os.path.dirname(stub_fn))
       assert os.path.isdir(stub_dir)
   else:
+    fold_start("script.opt_install_further_py_deps")
     if not pip_check_is_installed("tensorflow") and not pip_check_is_installed("tensorflow-gpu"):
       pip_install("tensorflow")
     if not pip_check_is_installed("Theano"):
       pip_install("theano==0.9")
-    for pkg in ["typing", "librosa", "PySoundFile", "nltk", "horovod", "matplotlib"]:
+    # Note: Horovod will usually fail to install in this env.
+    for pkg in ["typing", "librosa", "PySoundFile", "nltk", "matplotlib", "mpi4py"]:
       if not pip_check_is_installed(pkg):
         try:
           pip_install(pkg)
         except subprocess.CalledProcessError as exc:
           print("Pip install failed:", exc)
           print("Ignore...")
+    fold_end()
+
     stub_dir = "%s/python_stubs/python%s-generated" % (
       pycharm_system_dir, "%i.%i.%i" % sys.version_info[:3])
-    print("Generate stub dir:", stub_dir)
-    os.makedirs(stub_dir, exist_ok=True)
-    create_stub_dir(pycharm_dir=pycharm_dir, stub_dir=stub_dir, pycharm_major_version=pycharm_version[0])
+    if os.path.exists(stub_dir):
+      print("Python stubs already exists, not recreating (%s)" % stub_dir)
+    else:
+      print("Generate stub dir:", stub_dir)
+      os.makedirs(stub_dir)
+      create_stub_dir(pycharm_dir=pycharm_dir, stub_dir=stub_dir, pycharm_major_version=pycharm_version[0])
 
   jdk_table_fn = "%s/options/jdk.table.xml" % pycharm_config_dir
   print("Filename:", jdk_table_fn)
@@ -286,13 +379,13 @@ def setup_pycharm_python_interpreter(pycharm_dir):
   print("Save XML.")
   et.write(jdk_table_fn, encoding="UTF-8")
 
-  print("travis_fold:start:script.jdk_table")
+  fold_start("script.jdk_table")
   print("XML content:")
   rough_string = ElementTree.tostring(root, 'utf-8')
   print(minidom.parseString(rough_string).toprettyxml(indent="  "))
-  print("travis_fold:end:script.jdk_table")
+  fold_end()
 
-  print("travis_fold:end:script.setup_pycharm_python_interpreter")
+  fold_end()
 
 
 def read_spelling_dict():
@@ -341,7 +434,7 @@ def prepare_src_dir(files=None):
   :return: src dir
   :rtype: str
   """
-  print("travis_fold:start:script.prepare")
+  fold_start("script.prepare")
   print("Prepare project source files...")
   if not files:
     files = ["returnn", "tools", "demos", "rnn.py", "setup.py", "__init__.py"]
@@ -357,8 +450,9 @@ def prepare_src_dir(files=None):
       shutil.copy(fn, dst)
   create_spelling_dict_xml(src_tmp_dir)
   print("All source files:")
+  sys.stdout.flush()
   subprocess.check_call(["ls", "-la", src_tmp_dir])
-  print("travis_fold:end:script.prepare")
+  fold_end()
   return src_tmp_dir
 
 
@@ -372,7 +466,7 @@ def run_inspect(pycharm_dir, src_dir, skip_pycharm_inspect=False):
   """
   out_tmp_dir = tempfile.mkdtemp()
 
-  print("travis_fold:start:script.inspect")
+  fold_start("script.inspect")
   if not skip_pycharm_inspect:
     # Note: Will not run if PyCharm is already running.
     # Maybe we can find some workaround for this?
@@ -396,15 +490,13 @@ def run_inspect(pycharm_dir, src_dir, skip_pycharm_inspect=False):
   for py_src_file in find_all_py_source_files():
     ignore_codes = "E121,E123,E126,E226,E24,E704,W503,W504"  # PyCharm defaults
     ignore_codes += ",E111,E114"  # our defaults (4 space indents for code/comment)
-    if "/" in py_src_file and py_src_file.split("/")[0] != "returnn":
-      # Ignore warning (for now): module level import not at top of file.
-      ignore_codes += ",E402"
     cmd = [
       sys.executable, "%s/plugins/python-ce/helpers/pycodestyle.py" % pycharm_dir,
       py_src_file,
       "--ignore=%s" % ignore_codes,
       "--max-line-length=120"]
     print("$ %s" % " ".join(cmd))
+    sys.stdout.flush()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     stdout, _ = proc.communicate()
     # We do not check returncode, as this is always non-zero if there is any warning.
@@ -426,7 +518,7 @@ def run_inspect(pycharm_dir, src_dir, skip_pycharm_inspect=False):
   et = ElementTree.ElementTree(root)
   et.write("%s/Pep8CodeStyle.xml" % out_tmp_dir, encoding="UTF-8")
 
-  print("travis_fold:end:script.inspect")
+  fold_end()
   return out_tmp_dir
 
 
@@ -471,6 +563,8 @@ def report_inspect_xml(fn):
     if inspect_class == "PyArgumentListInspection" and "'d1' unfilled" in description:  # Numpy false positive
       possible_false_positive = True
     if inspect_class == "PyArgumentListInspection" and "'self' unfilled" in description:  # Numpy false positive
+      possible_false_positive = True
+    if inspect_class == "PyStringFormatInspection" and "Unexpected type None" in description:
       possible_false_positive = True
     if possible_false_positive:
       problem_severity = "POSSIBLE-FALSE %s" % problem_severity
@@ -537,7 +631,7 @@ def report_inspect_dir(inspect_xml_dir,
   file_count = None
   last_filename = None
   for filename, line, problem_severity, inspect_class, description in inspections:
-    if filename not in returnn_py_source_files:
+    if filename and filename not in returnn_py_source_files:
       continue  # for now, to not spam Travis too much
     if inspect_class in inspect_class_blacklist:
       continue
@@ -545,18 +639,23 @@ def report_inspect_dir(inspect_xml_dir,
     if filename != last_filename:
       if last_filename:
         if last_filename in explicitly_ignored_files:
-          print("This file is on the ignore list.")
+          msg = color.color("This file is on the ignore list.", color=gray_color)
         elif last_filename not in returnn_py_source_files:
-          print("This file is not part of the official RETURNN Python source code.")
+          msg = color.color("This file is not part of the official RETURNN Python source code.", color=gray_color)
         elif last_filename in ignore_count_for_files:
-          print("The inspection reports for this file are all non critical.")
+          msg = color.color("The inspection reports for this file are all non critical.", color=gray_color)
         else:
-          print(color.color("The inspection reports for this file are fatal!", color="red"))
-        print("travis_fold:end:inspect.%s" % last_filename)
+          msg = color.color("The inspection reports for this file are fatal!", color="red")
+        print(msg)
+        fold_end()
       if filename:
-        print("travis_fold:start:inspect.%s" % filename)
-        print(color.color(
-          "File: %s" % filename, color="black" if filename in ignore_count_for_files else "red"))
+        file_msg = color.color(
+          "File: %s" % filename, color=gray_color if filename in ignore_count_for_files else "red")
+        if github_env:
+          fold_start(file_msg)
+        else:
+          fold_start("inspect.%s" % filename)
+          print(file_msg)
       last_filename = filename
       file_count = 0
     if not filename:
@@ -571,16 +670,14 @@ def report_inspect_dir(inspect_xml_dir,
     msg_counted = True
     if inspect_class in inspect_class_not_counted:
       msg_counted = False
-    if filename.startswith("tools/") or filename.startswith("demos/"):
-      # We have lots of these, but I'm not sure how to fix this in a better way (yet).
-      if "module level import not at top of file" in description:
-        msg_counted = False
+    if problem_severity.startswith("POSSIBLE-FALSE "):
+      msg_counted = False
     if msg_counted:
-      print(msg)
+      print(color.color(msg, color="red"))
       if filename not in ignore_count_for_files:
         total_relevant_count += 1
     else:
-      print(color.color(msg, color="black"))
+      print(color.color(msg, color=gray_color))
     file_count += 1
 
   print("Total relevant inspection reports:", total_relevant_count)
