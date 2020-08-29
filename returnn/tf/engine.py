@@ -2407,7 +2407,6 @@ class Engine(EngineBase):
       else:
         raise Exception("invalid output_file_format %r" % output_file_format)
       output_file.close()
-      return out_cache
 
   def search_single(self, dataset, seq_idx, output_layer_name=None, extra_fetches=None):
     """
@@ -2462,7 +2461,7 @@ class Engine(EngineBase):
       score = beam_scores[i // out_beam_size][i % out_beam_size] if beam_scores is not None else 0
       result = {"output": (score, hyp_seq)}
       if extra_fetches is not None:
-        # We assume the same batch-dim for the extra fetches
+        # We assume the same batch/beam-dim for the extra fetches
         for extra in extra_fetches:
           extra_seq_lens = output_d[extra + "__seq_lens"]
           extra_d = output_d[extra + "__output"]

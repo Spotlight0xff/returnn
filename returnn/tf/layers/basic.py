@@ -6282,7 +6282,11 @@ class HDFDumpLayer(LayerBase):
           if value_seq_lens:
             batch_value_seq_sizes = numpy.zeros((value_batch, len(value_seq_lens)), dtype="int32")
             for i_, (axis, size) in enumerate(sorted(value_seq_lens.items())):
-              assert isinstance(size, numpy.ndarray) and size.shape == (value_batch,)
+              if size.shape != (value_batch,):
+                assert value_batch == 1 and len(size.shape) == 1  # hacky
+                batch_value_seq_sizes[:, i_] = numpy.array([[size[0]]])
+                continue
+              assert isinstance(size, numpy.ndarray) and size.shape == (value_batch,), (key, value.shape, value_sizes, value)
               batch_value_seq_sizes[:, i_] = size
             extra["%s_seq_lens" % key] = batch_value_seq_sizes
           elif self.dump_whole_batches:
