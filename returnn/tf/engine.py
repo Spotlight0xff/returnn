@@ -2409,14 +2409,15 @@ class Engine(EngineBase):
       output_file.close()
       return out_cache
 
-  def search_single(self, dataset, seq_idx, output_layer_name=None):
+  def search_single(self, dataset, seq_idx, output_layer_name=None, extra_fetches=None):
     """
     Performs search.
     See also :func:`forward_single`.
 
     :param Dataset.Dataset dataset:
     :param int seq_idx: index of sequence, -1 for all sequences in dataset
-    :param str|None output_layer_name: e.g. "output". if not set, will read from config "search_output_layer"
+    :param list|str|None output_layer_name: e.g. "output". if not set, will read from config "search_output_layer"
+    :param list|None extra_fetches: additional layer fetches
     :return: list of score and numpy array, each numpy arry in format (time,dim)
     :rtype: list[(float,numpy.ndarray)]
     """
@@ -2432,10 +2433,21 @@ class Engine(EngineBase):
       print("Given output %r has beam size %i." % (output_layer, out_beam_size), file=log.v4)
       output_layer_beam_scores_t = output_layer.get_search_choices().beam_scores
 
-    output_d = self.run_single(dataset=dataset, seq_idx=seq_idx, output_dict={
+    fetch_dict = {
       "output": output_t,
       "seq_lens": output_seq_lens_t,
-      "beam_scores": output_layer_beam_scores_t})
+      "beam_scores": output_layer_beam_scores_t}
+    # to make HDFDumpLayer work:
+    if self.network.get_post_control_dependencies():
+      fetch_dict["post_control_dependencies"] = self.network.get_post_control_dependencies()
+    if extra_fetches is not None:
+      assert isinstance(extra_fetches, list)
+      for extra_fetch in extra_fetches:
+        layer = self.network.layers[extra_fetch]
+        fetch_dict[extra_fetch + "__output"] = layer.output.get_placeholder_as_batch_major()
+        fetch_dict[extra_fetch + "__seq_lens"] = layer.output.get_sequence_lengths()
+
+    output_d = self.run_single(dataset=dataset, seq_idx=seq_idx, output_dict=fetch_dict)
     output = output_d["output"]
     seq_lens = output_d["seq_lens"]
     beam_scores = output_d["beam_scores"]
@@ -2448,7 +2460,14 @@ class Engine(EngineBase):
       hyp_seq = output[i][:seq_lens[i]]
       # txt = " ".join(map(labels["classes"].__getitem__, output[i][:seq_lens[i]]))
       score = beam_scores[i // out_beam_size][i % out_beam_size] if beam_scores is not None else 0
-      results += [(score, hyp_seq)]
+      result = {"output": (score, hyp_seq)}
+      if extra_fetches is not None:
+        # We assume the same batch-dim for the extra fetches
+        for extra in extra_fetches:
+          extra_seq_lens = output_d[extra + "__seq_lens"]
+          extra_d = output_d[extra + "__output"]
+          result[extra] = extra_d[i][:extra_seq_lens[i]]
+      results += [result]
     return results
 
   def search_single_seq(self, sources, output_layer_name=None):
