@@ -15,14 +15,18 @@ class NumpyDumpDataset(Dataset):
   """
 
   file_format_data = "%i.data"
-  file_format_targets = "%i.targets.alignment"
+  file_format_targets = "%i.targets"
 
   def __init__(self, prefix, postfix=".txt.gz",
                start_seq=0, end_seq=None,
                num_inputs=None, num_outputs=None, **kwargs):
     super(NumpyDumpDataset, self).__init__(**kwargs)
     self.file_format_data = prefix + self.file_format_data + postfix
-    self.file_format_targets = prefix + self.file_format_targets + postfix
+    if isinstance(num_outputs, dict):
+        self.file_format_targets = {target: prefix + self.file_format_targets + "." + target + postfix
+                                    for target, _ in num_outputs.items() if target != "data"}
+    else:
+      self.file_format_targets["classes"] = prefix + self.file_format_targets + postfix
     self.start_seq = start_seq
     self._init_num_seqs(end_seq)
     self._seq_index = None
@@ -39,7 +43,7 @@ class NumpyDumpDataset(Dataset):
         break
       if not os.path.exists(self.file_format_data % i):
         break
-      if not os.path.exists(self.file_format_targets % i):
+      if not all([os.path.exists(format_target % i) for format_target in self.file_format_targets.values()]):
         break
       last_seq = i
       i += 1
@@ -57,10 +61,13 @@ class NumpyDumpDataset(Dataset):
     """
     real_idx = self._seq_index[seq_idx]
     features = numpy.loadtxt(self.file_format_data % real_idx)
-    targets = numpy.loadtxt(self.file_format_targets % real_idx)
     assert features.ndim == 2
     assert features.shape[1] == self.num_inputs
-    assert targets.ndim == 1
+    targets = {}
+    for target, format_target in self.file_format_targets.items():
+      targets_data = numpy.loadtxt(format_target % real_idx)
+      assert targets_data.ndim == 1
+      targets[target] = targets_data
     self._add_cache_seq(seq_idx, features, targets)
 
   # ------------ Dataset API --------------
