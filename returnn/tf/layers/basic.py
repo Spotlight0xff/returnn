@@ -5369,6 +5369,28 @@ class SubnetworkLayer(LayerBase):
           network=network, name="%s/%s" % (name, loss.name)))
     return losses
 
+  @classmethod
+  def get_sub_layer_out_data_from_opts(cls, layer_name, parent_layer_kwargs):
+    """
+    :param str layer_name: sub layer name
+    :param dict[str] parent_layer_kwargs:
+    :rtype: (Data, TFNetwork, type)|None
+    """
+    # Data(name="align_scores", shape=(), dtype="float32"), parent_layer_kwargs["network"], InternalLayer
+    # subnet_dict = parent_layer_kwargs["subnetwork"]
+    parent_name = parent_layer_kwargs["name"]
+    subnet = cls._construct_template_subnet(
+      name=parent_name, network=parent_layer_kwargs["network"], subnetwork=parent_layer_kwargs["subnetwork"],
+      parent_layer_cache=parent_layer_kwargs.get("_parent_layer_cache", None),
+      sources=parent_layer_kwargs["sources"], concat_sources=parent_layer_kwargs.get("concat_sources", True))
+    assert layer_name in subnet.layers
+    sub_layer = subnet.layers[layer_name]
+    # sub_class.get_out??
+    # sub_out_data = sub_layer.get_out_data_from_opts(**sub_layer.kwargs)
+    return sub_layer.output, parent_layer_kwargs["network"], InternalLayer
+    # return sub_out_data, parent_layer_kwargs["network"], InternalLayer
+    # return cls.subnetwork.get_out_data_from_opts(**parent_layer_kwargs), parent_layer_kwargs["network"], InternalLayer  # same type
+
   def get_sub_layer(self, layer_name):
     """
     :param str layer_name: name of the sub_layer (right part of '/' separated path)
@@ -5386,7 +5408,12 @@ class SubnetworkLayer(LayerBase):
     :param int|str|None key: also the special key "*"
     :rtype: tf.Tensor|None
     """
-    h = self.subnetwork.get_default_output_layer().get_last_hidden_state(key=key)
+    # TODO: fix this, either by copying the last_hidden_state in CopyLayer
+    # or by letting the user specify the default output-layer.
+    # In our case, we can't rename lstm0 -> output, then the param-loading
+    # would break.
+    # h = self.subnetwork.get_default_output_layer().get_last_hidden_state(key=key)
+    h = self.subnetwork.layers["lstm0"].get_last_hidden_state(key=key)
     if h is not None:
       return h
     return super(SubnetworkLayer, self).get_last_hidden_state(key=key)
