@@ -6161,22 +6161,39 @@ class PrintLayer(LayerBase):
   """
   layer_class = "print"
 
-  def __init__(self, summarize=99, extra_print_args=(), **kwargs):
+  def __init__(self, summarize=99, extra_print_args=(), filename=None, **kwargs):
     """
     :param int|None summarize: passed to :func:`py_print`
     :param list|tuple extra_print_args:
+    :param str|None filename: if not None, write tensor to filename, instead of stdout.
     """
     super(PrintLayer, self).__init__(**kwargs)
     from returnn.tf.util.basic import py_print
     with tf.name_scope("print_layer"):
       source = self.sources[0]
-      print_args = [self.__class__.__name__, self.name, source.output.placeholder]
-      print_args.extend(extra_print_args)
-      output = py_print(source.output.placeholder, print_args, summarize=summarize)
-      if not tf_util.get_current_control_flow_context():  # Only possible to globally register if not in cond/loop.
-        self.network.register_post_control_dependencies([output])
-      with tf.control_dependencies([output]):
-        self.output.placeholder = tf.identity(source.output.placeholder)
+
+      if isinstance(filename, str):
+        import numpy
+
+        def save_tensor(tensor, step):
+          def np_save(step, *args):
+            numpy.savez(filename + "." + str(step), *args)
+
+          save_op = tf_compat.v1.py_func(np_save, [step, tensor], [])
+          with tf.control_dependencies([save_op]):
+            return tf.identity(source.output.placeholder)
+
+        self.output.placeholder = save_tensor(source.output.placeholder, step=self.network.get_rec_step_index())
+      else:
+        assert filename is None
+        print_args = [self.__class__.__name__, self.name, source.output.placeholder]
+        print_args.extend(extra_print_args)
+        output = py_print(source.output.placeholder, print_args, summarize=summarize)
+        if not tf_util.get_current_control_flow_context():  # Only possible to globally register if not in cond/loop.
+          self.network.register_post_control_dependencies([output])
+        with tf.control_dependencies([output]):
+          self.output.placeholder = tf.identity(source.output.placeholder)
+      self.rec_vars_outputs = self.sources[0].rec_vars_outputs.copy()
       self.output.size_placeholder = source.output.size_placeholder.copy()
 
   @classmethod
