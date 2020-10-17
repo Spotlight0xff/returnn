@@ -1256,6 +1256,54 @@ def fast_bw_fsa_staircase(seq_lens, with_loop=False, max_skip=None, start_max_sk
     start_end_states=numpy.array(start_end_states).transpose())
 
 
+def fast_transducer_lattice(seq_lens, target_seq_lens, targets, blank_index, topology="rna"):
+  """
+  Builds up the lattice required to run full-sum training (for RNA/RNN-T transducer).
+
+  :param list[int]|numpy.ndarray seq_lens: time, usually called T
+  :param list[int]|numpy.ndarray target_seq_lens: usually called U
+  :param numpy.ndarray targets: (B, U)
+  :param int blank_index:
+  :param str topology: specifies the label topology, currently: "rna", "rnnt", or "ctc"
+  :rtype: FastBaumWelchBatchFsa
+  """
+  n_batch = len(seq_lens)
+  # numpy.ndarray edges: (4,num_edges), edges of the graph (from,to,emission_idx,sequence_idx)
+  # numpy.ndarray weights: (num_edges,), weights of the edges
+  # numpy.ndarray start_end_states: (2, batch), (start,end) state idx in automaton.
+  edges = []
+  # start_end_states = []
+  max_seq_len = max(seq_lens)
+  max_target_seq_len = max(target_seq_lens)
+  for t in range(1, max_seq_len):
+    for u in range(1, max_target_seq_len):
+      for seq_idx in range(n_batch):
+        to_idx = t*max_target_seq_len + u
+        if topology == "rna":
+          # this is completetly wrong, but let's first get the CUDA full-sum running, for debugging.
+          label_idx = targets[seq_idx, u - 1]
+          edges += [(to_idx - 1, to_idx, label_idx, seq_idx)]
+          edges += [(to_idx - 1, to_idx, blank_index, seq_idx)]
+          # if t >= u:  # strictly monotonic
+          #   if u < max_target_seq_len:  # not last
+          #     from_idx = (to_idx - 1) % max_target_seq_len  # u - 1
+          #     label_idx = targets[batch_idx, u - 1]
+          #     edges += [(from_idx, to_idx, label_idx, seq_idx)]  # emission
+          #   blank_from_idx = (t-1)*max_target_seq_len+u
+          #   edges += [(blank_from_idx, to_idx, blank_index, seq_idx)]  # blank
+        # is_last_state = state_idx == t*(max_target_seq_len-1)+u*(max_target_seq_len-1)
+        # if not is_last_state:
+        #   edges += [(from_idx, to_idx, emission_idx, seq_idx)]
+
+  start_end_states = [(0, len_t*len_u) for len_t, len_u in zip(seq_lens, target_seq_lens)]
+  assert len(start_end_states) == n_batch
+  weights = [0.0] * len(edges)
+  return FastBaumWelchBatchFsa(
+    edges=numpy.array(edges).transpose(),
+    weights=numpy.array(weights),
+    start_end_states=numpy.array(start_end_states).transpose())
+
+
 def main():
   """
   Demo

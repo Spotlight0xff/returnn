@@ -1280,7 +1280,6 @@ def rna_loss(logits, logits_seq_lens, targets, targets_seq_lens,
   # TODO: combine both gather_nd calls.
 
   lp_y = tf.gather_nd(log_sm, lp_y_idxs)  # (B, T, U)
-  lp_y = tf.Print(lp_y, ["lp_y:", lp_y, lp_y.shape], summarize=-1)
   lp_blank = tf.gather_nd(log_sm, lp_blank_idxs)  # (B, T, U)
 
   lp_gather = tf.stack([lp_y, lp_blank], axis=-1)  # (B, T, U, 2)

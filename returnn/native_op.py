@@ -5030,22 +5030,6 @@ class GetCtcFsaFastBwOp(NativeOpGenBase):
 
 class FastTransducerTSLossOp(NativeOpGenBase):
   """
-  We compute the Transducer Full-Sum loss by first constructing a graph lattice (2D grid),
-  which is precomputed (`edges`, `weights`=0, `start_end_states`).
-  Internally, this lattice (T, U) is represented as T*U states.
-  For RNN-T topology (U-1 targets, T timesteps):
-
-  U
-  ^ 3-->6-->9
-  | ^   ^   ^
-  | |   |   |
-  | 2-->5-->8
-  | ^   ^   ^
-  | |   |   |
-  | 1-->4-->7
-  L__________> T
-
-  Then this graph is "flattened" to 1-->2-->3-->4... (with all the edges intact)
 
   inputs:
     :param scores: scores in -log space. 4d (batch,time,target,dim)
@@ -5084,52 +5068,6 @@ class FastTransducerTSLossOp(NativeOpGenBase):
         }
       }
     """,
-    "101_next_frame":  """
-      DEF_KERNEL
-      void next_frame(bool fwd, unsigned num_edges, unsigned  num_emissions,
-                      unsigned* sequence_idxs, unsigned* from_buffer, unsigned* to_buffer, float* weight_buffer, unsigned* emission_idxs,
-                      float* prev_frame, float* next_frame, float* logp, float* edge_buffer) {
-        unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
-        if (idx >= num_edges) {
-          return;
-        }
-        //fprintf(stderr, "idx < num_edges: %d < %d\\n", idx, num_edges);
-
-        unsigned from     = from_buffer  [idx];
-        float    prev_val = prev_frame[from];
-        if (isinf(prev_val)) {
-          edge_buffer[idx] = INF_F;
-          return;
-        }
-        fprintf(stderr, "isinf(%f)=false for from[idx=%d]=%d\\n", prev_val, idx, from);
-
-        unsigned to           = to_buffer    [idx];
-        unsigned emission_idx = emission_idxs[idx];
-        float    edge_weight  = weight_buffer[idx];
-        unsigned sequence_idx = sequence_idxs[idx];
-
-        if (fwd) {
-          fprintf(stderr, "idx=%3d: from=%3d to=%3d emission_idx=%3d seq-idx=%2d\\n",
-                  idx, from, to, emission_idx, sequence_idx);
-          //fprintf(stderr, "a(%2d, %2d) = a(%2d, %2d) * p(y_%2d|%2d, %2d)",
-          //                to, 0, from, 0, )
-        }
-
-        float val = prev_val + edge_weight + logp[sequence_idx * num_emissions + emission_idx];
-        // edge1:  a(t, u) = a(t-1, u)   * p(blank|t-1, u)
-        // edge2:  a(t, u) = a(t-1, u-1) * p(y    |t-1, u-1)
-        // float val = prev_val + logp[sequence_idx*num_emission + emission_idx]
-
-
-        if (fwd) {
-          edge_buffer[idx] += val;
-        }
-        else {
-          edge_buffer[idx] += prev_val;
-        }
-        atomic_prob_add(next_frame + to, val);
-      }
-    """,
     "102_normalize": """
       DEF_KERNEL
       void normalize(float* buffer, unsigned* sequence_idxs, unsigned num_edges, unsigned num_seqs, float* sum_output) {
@@ -5166,6 +5104,7 @@ class FastTransducerTSLossOp(NativeOpGenBase):
       DEF_KERNEL
       void compute_result(float* state_buffer, int32* len_t, int32* len_u,
                           unsigned buffer_stride, unsigned n_seqs, float* sum_output) {
+                          // gets the log-likelihood from alpha[T, U] for each seq.
         unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
         if (idx >= n_seqs) {
           return;
@@ -5174,7 +5113,8 @@ class FastTransducerTSLossOp(NativeOpGenBase):
         unsigned t = len_t[idx];
         unsigned u = len_u[idx];
         sum_output[idx] = state_buffer[idx*buffer_stride+u];
-        fprintf(stderr, "log likelihood for [B=%2d, T=%2d, U=%2d] = %.3f\\n", idx, t, u, sum_output[idx]);
+        fprintf(stderr, "log likelihood for [B=%2d, T=%2d, U=%2d] = %.3f\\n",
+                        idx, t, u, sum_output[idx]);
       }
     """,
     "104_next_frame_rna": """
@@ -5186,14 +5126,16 @@ class FastTransducerTSLossOp(NativeOpGenBase):
         unsigned seq_idx = blockIdx.x;
         unsigned target_idx = threadIdx.x;
 
-        if (target_idx > len_u[seq_idx] || timestep < target_idx) {
+        // TODO: check, not entirely correct.
+        if (target_idx > len_u[seq_idx] || timestep < target_idx) { // || timestep > len_t[seq_idx]+1) {
           return;
         }
 
         // a(t, u) = a(t-1, u  ) * p(blank|t-1, u  )
         //         + a(t-1, u-1) * p(y[u-1]    |t-1, u-1)
         // alphas_prev: (B, U)
-        // scores_prev: (B, U, 2)
+        // scores_prev: (B, U, 2)             log likelihood for [B= 1, T= 4, U= 1] = 3.685
+
         float blank_alpha = alphas_prev[seq_idx*buffer_stride+target_idx];
         float blank_lp = scores_t[seq_idx*sequence_stride+target_idx*target_stride+1];
         float blank =  blank_alpha + blank_lp;
@@ -5216,7 +5158,9 @@ class FastTransducerTSLossOp(NativeOpGenBase):
           }
         }
         fprintf(stderr, "\\n");
-        alphas_next[seq_idx*buffer_stride+target_idx] = val;
+        if (timestep < len_t[seq_idx]+1) {
+          alphas_next[seq_idx*buffer_stride+target_idx] = val;
+        }
         return;
       }
     """,
@@ -5389,7 +5333,7 @@ class FastTransducerTSLossOp(NativeOpGenBase):
         d_logp+(t-1)*frame_stride,  // scores_t
         d_state_buffer_prev,  // alphas_prev
         d_state_buffer_next,   // alphas_next
-        Ndarray_STRIDE(state_buffer, 2)  // == n_seqs == B
+        Ndarray_STRIDE(state_buffer, 1)  // == n_seqs == B
         ));
       HANDLE_LAST_ERROR();
 
@@ -5404,7 +5348,7 @@ class FastTransducerTSLossOp(NativeOpGenBase):
       d_state_buffer_prev,  // last written buffer  (B, U)
       d_len_t,
       d_len_u,
-      Ndarray_STRIDE(state_buffer, 2),  // == n_seqs == B,
+      Ndarray_STRIDE(state_buffer, 1),  // == n_seqs == B,
       n_seqs,
       d_sum_output  // (B,)
       ));
